@@ -3,7 +3,7 @@
 
 const DEFAULTS = {
   subfolder: 'Videos', askWhere: false, autoDeep: true, showAll: false, minSizeKB: 300,
-  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar', autoClear: 'never'
+  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar', autoClear: 'never', rememberLast: true
 };
 let settings = Object.assign({}, DEFAULTS);
 const settingsReady = browser.storage.local.get(DEFAULTS).then(s => { settings = s; applyIconAction(); });

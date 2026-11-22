@@ -665,6 +665,7 @@ async function finishStream(job, r) {
   for (const [parts, mime, name] of outputs) ids.push(await saveBlobAndWait(parts, mime, name, job));
   job.downloadId = ids[0];
   job.filename = outputs[0][2];
+  await rememberLocation(job, ids[0], !!job.askWhere);
   await VDLStore.deleteParts(job.id).catch(() => {});
   setState(job, 'done', { phase: '', error: '', tracks: null, done: job.total, estTotal: job.bytes, permanent: false });
 }
@@ -674,7 +675,8 @@ async function saveBlobAndWait(parts, mime, filename, job) {
   const url = URL.createObjectURL(new Blob(parts, { type: mime }));
   let id;
   try {
-    id = await browser.downloads.download({ url, filename: buildPath(filename), saveAs: !!job.askWhere, conflictAction: 'uniquify' });
+    job.relPath = buildPath(filename);
+    id = await browser.downloads.download({ url, filename: job.relPath, saveAs: !!job.askWhere, conflictAction: 'uniquify' });
   } catch (e) {
     URL.revokeObjectURL(url);
     if (/cancel/i.test(e.message || '')) { const c = new Error('Speichern abgebrochen'); c.saveCancelled = true; throw c; }
@@ -693,6 +695,83 @@ async function saveBlobAndWait(parts, mime, filename, job) {
     URL.revokeObjectURL(url);
   }
   return id;
+}
+
+// ---------------------------------------------------------------------------
+// Letzten Speicherort merken
+// Firefox lässt Erweiterungen nur innerhalb des Firefox-Download-Ordners selbst speichern.
+// Daher: Download-Ordner ermitteln und einen per „Speichern unter …“ gewählten Ordner darin
+// als Unterordner übernehmen. Liegt er außerhalb, wird das klar gemeldet.
+// ---------------------------------------------------------------------------
+const normDir = p => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+const isWinPath = p => /^[a-z]:/i.test(p) || /^\/\//.test(p);
+const sameDir = (a, b) => (isWinPath(a) ? a.toLowerCase() === b.toLowerCase() : a === b);
+const dirOf = p => String(p).replace(/[\\/][^\\/]*$/, '');
+
+async function storedBaseDir() {
+  const s = await browser.storage.local.get({ downloadBaseDir: '' });
+  return s.downloadBaseDir || '';
+}
+// Aus einem normalen Download (ohne Dialog) den Firefox-Download-Ordner ableiten
+async function learnBaseDir(absPath, relPath) {
+  if (!absPath || !relPath) return '';
+  const absDir = normDir(dirOf(absPath));
+  const relDir = normDir(dirOf(relPath) === relPath ? '' : dirOf(relPath));
+  let base = absDir;
+  if (relDir) {
+    const tail = '/' + relDir;
+    if (!sameDir(absDir.slice(-tail.length), tail)) return '';
+    base = absDir.slice(0, -tail.length);
+  }
+  const native = absPath.includes('\\') ? base.replace(/\//g, '\\') : base;
+  await browser.storage.local.set({ downloadBaseDir: native });
+  return native;
+}
+// Falls noch unbekannt: winzige Testdatei speichern, Ort ablesen, Datei wieder löschen
+async function probeBaseDir() {
+  const url = URL.createObjectURL(new Blob(['Video-Downloader: Ordnertest – kann gelöscht werden'], { type: 'text/plain' }));
+  try {
+    const id = await browser.downloads.download({ url, filename: 'vdl-ordnertest.txt', saveAs: false, conflictAction: 'uniquify' });
+    for (let i = 0; i < 50; i++) {
+      const [d] = await browser.downloads.search({ id });
+      if (d && d.state === 'complete') {
+        const base = dirOf(d.filename);
+        await browser.downloads.removeFile(id).catch(() => {});
+        await browser.downloads.erase({ id }).catch(() => {});
+        await browser.storage.local.set({ downloadBaseDir: base });
+        return base;
+      }
+      if (d && d.state === 'interrupted') break;
+      await sleep(100);
+    }
+  } catch (e) { /* ignore */ } finally { URL.revokeObjectURL(url); }
+  return '';
+}
+
+async function rememberLocation(job, downloadId, viaDialog) {
+  const [d] = await browser.downloads.search({ id: downloadId }).catch(() => []);
+  if (!d || !d.filename) return;
+  if (!viaDialog) { await learnBaseDir(d.filename, job.relPath); return; }
+  if (settings.rememberLast === false) return;
+  const chosenDir = dirOf(d.filename);
+  let base = await storedBaseDir();
+  if (!base) base = await probeBaseDir();
+  if (!base) return;
+  const nb = normDir(base), nd = normDir(chosenDir);
+  let rel = null;
+  if (sameDir(nd, nb)) rel = '';
+  else if (sameDir(nd.slice(0, nb.length + 1), nb + '/')) rel = nd.slice(nb.length + 1);
+  if (rel === null) {
+    job.note = 'Gespeichert in „' + chosenDir + '“. Dieser Ordner liegt außerhalb des Firefox-Download-Ordners (' + base +
+      '), dorthin darf Firefox Erweiterungen nicht automatisch speichern lassen. Lösung: In Firefox unter Einstellungen → Allgemein → Downloads diesen Ordner wählen.';
+    await browser.storage.local.set({ lastOutsideDir: chosenDir });
+    return;
+  }
+  if (rel !== (settings.subfolder || '')) {
+    settings.subfolder = rel;
+    await browser.storage.local.set({ subfolder: rel, lastOutsideDir: '' });
+    job.note = 'Speicherort gemerkt – künftige Downloads landen automatisch in „' + chosenDir + '“.';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -742,8 +821,10 @@ async function runDirect(job) {
       job.bytes = 0;
     }
     job.filename = job.base + '.' + job.ext;
+    job.relPath = buildPath(job.filename);
+    job.usedSaveAs = !!job.askWhere && !job.restarts;
     const id = await browser.downloads.download({
-      url: job.source, filename: buildPath(job.filename),
+      url: job.source, filename: job.relPath,
       saveAs: !!job.askWhere && !job.restarts, conflictAction: 'uniquify'
     });
     job.downloadId = id;
@@ -759,10 +840,11 @@ async function runDirect(job) {
   }
 }
 
-function finishDirect(job, d) {
+async function finishDirect(job, d) {
   job.bytes = (d && (d.fileSize || d.bytesReceived)) || job.bytes;
   job.estTotal = job.bytes;
   if (d && d.filename) job.filename = d.filename.split(/[\\/]/).pop();
+  if (d) await rememberLocation(job, d.id, !!job.usedSaveAs).catch(() => {});
   setState(job, 'done', { phase: '', error: '' });
   pumpJobs();
 }

@@ -113,3 +113,6 @@ body.pop .settings { max-height: 300px; overflow: auto; }
 .linkbtn { border: 0; background: none; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
 .linkbtn:hover { text-decoration: underline; }
 .toast { position: fixed; left: 50%; bottom: 44px; transform: translateX(-50%); background: var(--fg); color: var(--bg); font-size: 12px; padding: 6px 12px; border-radius: 6px; z-index: 60; }
+
+.set-where { color: var(--fg); font-weight: 600; }
+.set-warn { color: var(--warn); }

@@ -2,7 +2,7 @@
 'use strict';
 const VDL_DEFAULTS = {
   subfolder: 'Videos', askWhere: false, autoDeep: true, showAll: false, minSizeKB: 300,
-  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar', autoClear: 'never'
+  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar', autoClear: 'never', rememberLast: true
 };
 
 function el(tag, attrs, ...kids) {
@@ -62,12 +62,30 @@ async function renderSettings(root) {
 
   const saved = el('span', { class: 'set-saved' });
 
+  const extra = await browser.storage.local.get({ downloadBaseDir: '', lastOutsideDir: '' });
+  const where = el('p', { class: 'set-hint set-where' });
+  const showWhere = () => {
+    const base = extra.downloadBaseDir;
+    const sep = base.includes('\\') ? '\\' : '/';
+    const sub = folder.value.trim().split(/[\\/]+/).filter(Boolean).join(sep);
+    where.textContent = base ? 'Downloads landen in: ' + base + (sub ? sep + sub : '') : '';
+    where.hidden = !base;
+  };
+  folder.addEventListener('input', showWhere);
+  showWhere();
+  const outside = el('p', { class: 'set-hint set-warn', text: extra.lastOutsideDir
+    ? 'Zuletzt gewählt: „' + extra.lastOutsideDir + '“ – liegt außerhalb des Firefox-Download-Ordners und kann nicht automatisch verwendet werden. Lösung: diesen Ordner in Firefox als Download-Ordner einstellen.' : '' });
+  outside.hidden = !extra.lastOutsideDir;
+
   root.replaceChildren(
     el('label', { class: 'set-label', for: 'set-act', text: 'Klick auf das Symbol öffnet' }),
     act,
     el('label', { class: 'set-label', for: 'set-folder', text: 'Download-Ordner' }),
     folder,
+    where,
     el('p', { class: 'set-hint', text: 'Unterordner innerhalb deines Firefox-Download-Ordners. Leer lassen = direkt in den Download-Ordner. Den Hauptordner selbst änderst du in Firefox unter Einstellungen → Allgemein → Dateien und Anwendungen → Downloads.' }),
+    check('rememberLast', 'Zuletzt mit „Speichern unter …“ gewählten Ordner merken und künftig automatisch dorthin speichern'),
+    outside,
     check('askWhere', 'Vor jedem Download nach dem Speicherort fragen'),
     check('autoDeep', 'Tiefensuche automatisch starten, wenn kein Video gefunden wird'),
     check('showAll', 'Alle gefundenen Qualitätsstufen aufgeklappt anzeigen'),
