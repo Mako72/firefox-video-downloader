@@ -1,7 +1,12 @@
 {
   "addons": {
     "{07b4a90b-a676-462d-9600-a135be0b64ad}": {
-      "updates": []
+      "updates": [
+        {
+          "version": "1.1.2",
+          "update_link": "https://github.com/Mako72/firefox-video-downloader/releases/download/v1.1.2/video-downloader-1.1.2.xpi"
+        }
+      ]
     }
   }
 }
