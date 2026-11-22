@@ -97,22 +97,37 @@ jobs:
           f=$(ls signed/*.xpi | head -n1)
           mv "$f" "dist/video-downloader-${{ steps.v.outputs.version }}.xpi"
 
+      - name: Signierte Datei als Artefakt sichern
+        if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-downloader-${{ steps.v.outputs.version }}-signiert
+          path: dist/video-downloader-${{ steps.v.outputs.version }}.xpi
+
       - name: Release veröffentlichen
         if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.v.outputs.version }}"
-          FILE="dist/video-downloader-$V.xpi"
-          gh release create "v$V" --title "Version $V" \
+          NAME="video-downloader-$V.xpi"
+          FILE="dist/$NAME"
+          # Erst als Entwurf anlegen: Bei unveränderlichen Releases lassen sich Dateien nur an Entwürfe anhängen
+          gh release create "v$V" --draft --title "Version $V" \
             --notes "Signierte Firefox-Erweiterung. Datei anklicken bzw. in Firefox öffnen, um sie zu installieren. Bereits installierte Versionen aktualisieren sich automatisch."
-          # Mit dem richtigen Dateityp hochladen, damit Firefox beim Anklicken direkt die Installation anbietet
-          UPLOAD=$(gh api "repos/${{ github.repository }}/releases/tags/v$V" --jq .upload_url | sed 's/{.*}//')
-          curl -sSf -X POST \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Content-Type: application/x-xpinstall" \
-            --data-binary @"$FILE" \
-            "$UPLOAD?name=video-downloader-$V.xpi" > /dev/null
+          RID=$(gh api "repos/${{ github.repository }}/releases?per_page=30" --jq ".[] | select(.tag_name==\"v$V\") | .id" | head -n1)
+          echo "Release-ID: $RID"
+          # Mit dem Dateityp für Firefox-Erweiterungen hochladen (Klick installiert direkt); sonst normal hochladen
+          if ! curl -sSf -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Content-Type: application/x-xpinstall" \
+              --data-binary @"$FILE" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RID/assets?name=$NAME" > /dev/null; then
+            echo "::warning::Upload mit Dateityp fehlgeschlagen – lade normal hoch."
+            gh release upload "v$V" "$FILE" --clobber
+          fi
+          gh release edit "v$V" --draft=false --latest
+          gh release view "v$V" --json assets --jq '.assets[].name'
 
       - name: Update-Liste aktualisieren
         if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
