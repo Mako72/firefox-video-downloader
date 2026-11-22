@@ -224,32 +224,30 @@ function updateRow(r, g) {
         b('✕ Abbrechen', 'danger', 'Download abbrechen', () => send({ type: 'cancelJob', id: job.id }).then(refreshSoon)));
     } else {
       r.acts.append(
-        b(doneAgain ? '⬇ Nochmal' : '⬇ Herunterladen', '', 'In bester Qualität in den eingestellten Ordner laden', () => startDownload(it.key, false), block),
-        b('💾 Speichern unter …', 'ghost', 'Ort und Dateinamen selbst wählen', () => startDownload(it.key, true), block));
+        b('💾 Speichern unter …', 'primary', 'Ort und Dateinamen selbst wählen', () => startDownload(it.key, true), block),
+        b(doneAgain ? '⬇ Nochmal' : '⬇ Herunterladen', 'ghost', 'Ohne Nachfrage in den eingestellten Ordner laden', () => startDownload(it.key, false), block));
     }
     r.acts.append(more);
     return;
   }
 
-  // Popup: runde Knöpfe rechts
-  let main;
+  // Popup: runde Knöpfe rechts – „Speichern unter“ ist die bevorzugte Aktion
   if (active) {
-    main = el('button', { class: 'dl ghost', title: 'Pausieren', text: '⏸' });
-    main.addEventListener('click', () => send({ type: 'pauseJob', id: job.id }).then(refreshSoon));
+    const m = el('button', { class: 'dl ghost', title: 'Pausieren', text: '⏸' });
+    m.addEventListener('click', () => send({ type: 'pauseJob', id: job.id }).then(refreshSoon));
+    r.acts.append(m);
   } else if (resumable) {
-    main = el('button', { class: 'dl', title: 'Fortsetzen', text: '▶' });
-    main.addEventListener('click', () => send({ type: 'resumeJob', id: job.id }).then(refreshSoon));
+    const m = el('button', { class: 'dl', title: 'Fortsetzen', text: '▶' });
+    m.addEventListener('click', () => send({ type: 'resumeJob', id: job.id }).then(refreshSoon));
+    r.acts.append(m);
   } else {
-    main = el('button', { class: 'dl', title: doneAgain ? 'Erneut herunterladen' : 'Herunterladen (beste Qualität)', text: '⬇' });
-    main.disabled = !!block;
-    main.addEventListener('click', () => startDownload(it.key, false));
-  }
-  r.acts.append(main);
-  if (!active && !resumable) {
-    const sa = el('button', { class: 'dl ghost', title: 'Speichern unter …', text: '💾' });
+    const sa = el('button', { class: 'dl', title: 'Speichern unter … (Ort selbst wählen)', text: '💾' });
     sa.disabled = !!block;
     sa.addEventListener('click', () => startDownload(it.key, true));
-    r.acts.append(sa);
+    const dl = el('button', { class: 'dl ghost', title: doneAgain ? 'Erneut herunterladen' : 'Herunterladen (ohne Nachfrage)', text: '⬇' });
+    dl.disabled = !!block;
+    dl.addEventListener('click', () => startDownload(it.key, false));
+    r.acts.append(sa, dl);
   }
   r.acts.append(more);
 }
@@ -288,8 +286,8 @@ function openMenu(anchor, g) {
     kids.push(item('✕  Abbrechen', () => send({ type: 'cancelJob', id: job.id }).then(refreshSoon)));
     kids.push(el('div', { class: 'sep' }));
   }
-  kids.push(item('⬇  Herunterladen', () => startDownload(it.key, false), { right: qualityText(it), disabled: block }));
-  kids.push(item('💾  Speichern unter …', () => startDownload(it.key, true), { disabled: block }));
+  kids.push(item('💾  Speichern unter …', () => startDownload(it.key, true), { right: qualityText(it), disabled: block }));
+  kids.push(item('⬇  Herunterladen (ohne Nachfrage)', () => startDownload(it.key, false), { disabled: block }));
   const audio = audioPossible(it);
   kids.push(item('🎵  Nur Ton herunterladen', () => {
     if (state.settings.openSidebar && !IN_SIDEBAR) openSidebar();

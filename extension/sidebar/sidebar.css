@@ -50,3 +50,9 @@ body.sidebar .row { flex-wrap: wrap; row-gap: 6px; }
 .acts.textacts .btn.small { white-space: nowrap; }
 .acts.textacts .btn.small { padding: 4px 9px; font-size: 12px; }
 .acts.textacts .more { height: 26px; width: 26px; }
+
+/* Hauptaktion hervorheben (ab 1.8.1) */
+.acts.textacts .btn.small.primary { background: var(--accent); color: var(--accent-fg); font-weight: 600; box-shadow: 0 1px 3px color-mix(in srgb, var(--accent) 45%, transparent); }
+.acts.textacts .btn.small.primary:hover { filter: brightness(1.1); }
+.acts.textacts .btn.small.ghost { color: var(--muted); }
+.acts.textacts .btn.small.ghost:hover { color: var(--fg); }
