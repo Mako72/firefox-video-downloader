@@ -4,17 +4,22 @@
   <meta charset="utf-8">
   <link rel="stylesheet" href="popup.css">
 </head>
-<body>
-  <header>
+<body class="pop">
+  <header class="topbar">
     <img src="../icons/icon.svg" alt="" class="logo">
     <h1>Video-Downloader</h1>
-    <button id="deep" class="btn ghost" title="Seite gründlich nach versteckten Videos durchsuchen">🔍 Tiefensuche</button>
-    <button id="side" class="btn ghost icon" title="Download-Seitenleiste öffnen (Alt+Umschalt+V)">📋</button>
-    <button id="gear" class="btn ghost icon" title="Einstellungen">⚙</button>
+    <button id="deep" class="ibtn" title="Tiefensuche – Seite gründlich nach versteckten Videos durchsuchen">🔍</button>
+    <button id="side" class="ibtn" title="Downloads in der Seitenleiste (Alt+Umschalt+V)">⬇</button>
+    <button id="gear" class="ibtn" title="Einstellungen">⚙</button>
   </header>
   <section id="settings" class="settings" hidden></section>
-  <div id="status" class="status"></div>
-  <ul id="list" class="list"></ul>
+  <div id="notice" class="notice" hidden></div>
+  <ul id="list" class="rows"></ul>
+  <footer class="foot">
+    <span id="count"></span>
+    <button id="openSide" class="linkbtn">Seitenleiste öffnen</button>
+  </footer>
+  <div id="menu" class="menu" hidden></div>
   <script src="../settings.js"></script>
   <script src="../ui-common.js"></script>
   <script src="popup.js"></script>

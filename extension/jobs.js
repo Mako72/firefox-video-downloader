@@ -123,7 +123,8 @@ function jobForItem(key) {
 // ---------------------------------------------------------------------------
 // Auftrag anlegen und Warteschlange
 // ---------------------------------------------------------------------------
-async function createJob(tabId, key) {
+async function createJob(tabId, key, opts) {
+  opts = opts || {};
   const st = tabs.get(tabId);
   const it = st && st.items.get(key);
   if (!it) throw new Error('Video nicht mehr vorhanden – Seite neu laden');
@@ -150,7 +151,7 @@ async function createJob(tabId, key) {
     created: Date.now(), state: 'queued', phase: '', note: '', error: '',
     done: 0, total: 0, bytes: 0, estTotal: it.size || 0, speed: 0, eta: 0,
     retries: 0, restarts: 0, refreshes: 0, retryAt: 0, tracks: null, downloadId: null,
-    askWhere: !!settings.askWhere, frameId: it.frameId || 0, viaPage: !!it.viaPage
+    askWhere: opts.askWhere != null ? !!opts.askWhere : !!settings.askWhere, frameId: it.frameId || 0, viaPage: !!it.viaPage
   };
   jobs.set(job.id, job);
   await persist(job, true);
@@ -752,7 +753,7 @@ restoreJobs();
 browser.runtime.onMessage.addListener(msg => {
   switch (msg.type) {
     case 'download':
-      return createJob(msg.tabId, msg.key).then(j => j.id, e => ({ error: e.message }));
+      return createJob(msg.tabId, msg.key, { askWhere: msg.askWhere }).then(j => j.id, e => ({ error: e.message }));
     case 'getJobs': {
       const order = { running: 0, merging: 0, queued: 1, interrupted: 2, paused: 3, error: 4, cancelled: 5, done: 6 };
       const list = [...jobs.values()].map(jobPub)
