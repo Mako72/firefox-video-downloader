@@ -116,3 +116,5 @@ body.pop .settings { max-height: 300px; overflow: auto; }
 
 .set-where { color: var(--fg); font-weight: 600; }
 .set-warn { color: var(--warn); }
+
+.row .acts .dl.ghost { width: 30px; height: 30px; font-size: 14px; }

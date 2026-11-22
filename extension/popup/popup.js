@@ -138,6 +138,7 @@ function createRow() {
   r.mid = el('div', { class: 'mid' }, r.ti, r.sub, r.state, r.pbar);
   r.acts = el('div', { class: 'acts' });
   r.root = el('li', { class: 'row' }, r.th, r.mid, r.acts);
+  if (IN_SIDEBAR) r.acts.className = 'acts textacts';
   r.thumbKey = null;
   return r;
 }
@@ -200,6 +201,37 @@ function updateRow(r, g) {
 
   // Knöpfe
   r.acts.replaceChildren();
+  const more = el('button', { class: 'more', title: 'Weitere Aktionen', text: '⋮' });
+  more.addEventListener('click', ev => { ev.stopPropagation(); openMenu(more, g); });
+  const doneAgain = job && job.state === 'done';
+
+  if (IN_SIDEBAR) {
+    // Seitenleiste: Knöpfe mit Text unter dem Titel
+    const b = (text, cls, title, fn, disabled) => {
+      const x = el('button', { class: 'btn small ' + (cls || ''), text });
+      if (title) x.title = title;
+      x.disabled = !!disabled;
+      x.addEventListener('click', fn);
+      return x;
+    };
+    if (active) {
+      r.acts.append(
+        b('⏸ Pausieren', 'ghost', 'Anhalten – später an derselben Stelle fortsetzen', () => send({ type: 'pauseJob', id: job.id }).then(refreshSoon)),
+        b('✕ Abbrechen', 'danger', 'Download abbrechen', () => send({ type: 'cancelJob', id: job.id }).then(refreshSoon)));
+    } else if (resumable) {
+      r.acts.append(
+        b('▶ Fortsetzen', '', 'An der abgebrochenen Stelle weiterladen', () => send({ type: 'resumeJob', id: job.id }).then(refreshSoon)),
+        b('✕ Abbrechen', 'danger', 'Download abbrechen', () => send({ type: 'cancelJob', id: job.id }).then(refreshSoon)));
+    } else {
+      r.acts.append(
+        b(doneAgain ? '⬇ Nochmal' : '⬇ Herunterladen', '', 'In bester Qualität in den eingestellten Ordner laden', () => startDownload(it.key, false), block),
+        b('💾 Speichern unter …', 'ghost', 'Ort und Dateinamen selbst wählen', () => startDownload(it.key, true), block));
+    }
+    r.acts.append(more);
+    return;
+  }
+
+  // Popup: runde Knöpfe rechts
   let main;
   if (active) {
     main = el('button', { class: 'dl ghost', title: 'Pausieren', text: '⏸' });
@@ -208,13 +240,18 @@ function updateRow(r, g) {
     main = el('button', { class: 'dl', title: 'Fortsetzen', text: '▶' });
     main.addEventListener('click', () => send({ type: 'resumeJob', id: job.id }).then(refreshSoon));
   } else {
-    main = el('button', { class: 'dl', title: job && job.state === 'done' ? 'Erneut herunterladen' : 'Herunterladen (beste Qualität)', text: '⬇' });
+    main = el('button', { class: 'dl', title: doneAgain ? 'Erneut herunterladen' : 'Herunterladen (beste Qualität)', text: '⬇' });
     main.disabled = !!block;
     main.addEventListener('click', () => startDownload(it.key, false));
   }
-  const more = el('button', { class: 'more', title: 'Weitere Aktionen', text: '⋮' });
-  more.addEventListener('click', ev => { ev.stopPropagation(); openMenu(more, g); });
-  r.acts.append(main, more);
+  r.acts.append(main);
+  if (!active && !resumable) {
+    const sa = el('button', { class: 'dl ghost', title: 'Speichern unter …', text: '💾' });
+    sa.disabled = !!block;
+    sa.addEventListener('click', () => startDownload(it.key, true));
+    r.acts.append(sa);
+  }
+  r.acts.append(more);
 }
 
 function startDownload(key, askWhere) {

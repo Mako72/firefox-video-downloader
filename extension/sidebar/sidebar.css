@@ -40,3 +40,13 @@ body.sidebar .row .th { flex-basis: 80px; height: 45px; }
 body.sidebar .foot { border-top: 0; }
 body.sidebar .update { position: static; }
 body.sidebar .settings { max-height: 45vh; overflow: auto; }
+
+/* Textknöpfe unter dem Titel (ab 1.8.0) */
+body.sidebar .row { align-items: flex-start; }
+body.sidebar .row .th { margin-top: 2px; }
+body.sidebar .row { flex-wrap: wrap; row-gap: 6px; }
+.acts.textacts { display: flex; flex-wrap: nowrap; gap: 5px; align-items: center; flex: 1 0 100%; }
+.acts.textacts .btn.small:first-child { flex: 1 1 auto; }
+.acts.textacts .btn.small { white-space: nowrap; }
+.acts.textacts .btn.small { padding: 4px 9px; font-size: 12px; }
+.acts.textacts .more { height: 26px; width: 26px; }
