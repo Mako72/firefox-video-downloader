@@ -3,13 +3,25 @@
 
 const DEFAULTS = {
   subfolder: 'Videos', askWhere: false, autoDeep: true, showAll: false, minSizeKB: 300,
-  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true
+  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar'
 };
 let settings = Object.assign({}, DEFAULTS);
-const settingsReady = browser.storage.local.get(DEFAULTS).then(s => { settings = s; });
+const settingsReady = browser.storage.local.get(DEFAULTS).then(s => { settings = s; applyIconAction(); });
+
+// Klick auf das Symbol: Seitenleiste öffnen/schließen (oder kleines Fenster, je nach Einstellung)
+function applyIconAction() {
+  browser.browserAction.setPopup({ popup: settings.iconAction === 'popup' ? 'popup/popup.html' : '' }).catch(() => {});
+  browser.browserAction.setTitle({ title: settings.iconAction === 'popup' ? 'Video-Downloader' : 'Video-Downloader – Seitenleiste öffnen' }).catch(() => {});
+}
+browser.browserAction.onClicked.addListener(() => {
+  // muss sofort im Klick passieren (Nutzeraktion), daher kein await davor
+  const p = browser.sidebarAction.toggle ? browser.sidebarAction.toggle() : browser.sidebarAction.open();
+  p.catch(() => browser.sidebarAction.open().catch(() => {}));
+});
 browser.storage.onChanged.addListener((ch, area) => {
   if (area !== 'local') return;
   for (const k in ch) settings[k] = ch[k].newValue;
+  if (ch.iconAction) applyIconAction();
   for (const id of tabs.keys()) scheduleUpdate(id);
 });
 

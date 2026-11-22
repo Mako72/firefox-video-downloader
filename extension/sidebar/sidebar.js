@@ -1,5 +1,6 @@
-'use strict';
 /* global el, fmtBytes, fmtEta, jobProgress, jobStatus */
+(() => {
+'use strict';
 
 const $jobs = document.getElementById('jobs');
 const $summary = document.getElementById('summary');
@@ -50,6 +51,8 @@ function render() {
 function renderSummary() {
   const active = data.jobs.filter(j => j.state === 'running' || j.state === 'merging');
   const waiting = data.jobs.filter(j => j.state === 'queued' || j.state === 'interrupted');
+  const tc = document.getElementById('tabDownloadsCount');
+  if (tc) tc.textContent = active.length + waiting.length ? String(active.length + waiting.length) : '';
   if (!active.length && !waiting.length) { $summary.replaceChildren(); return; }
   const speed = active.reduce((s, j) => s + (j.speed || 0), 0);
   const eta = Math.max(0, ...active.map(j => j.eta || 0));
@@ -196,3 +199,4 @@ browser.runtime.onMessage.addListener(msg => {
 // Countdown für automatische Wiederholversuche aktualisieren
 setInterval(() => { if (data.jobs.some(j => j.state === 'interrupted' && j.retryAt)) render(); }, 1000);
 refresh();
+})();

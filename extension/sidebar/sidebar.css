@@ -24,3 +24,19 @@ body.sidebar { width: auto; max-height: none; min-height: 100vh; display: flex; 
 .update .row { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
 .update.avail { background: color-mix(in srgb, var(--accent) 12%, var(--bg)); color: var(--fg); }
 .update .hint { font-size: 11px; }
+
+/* ===================== Reiter (ab 1.4.0) ===================== */
+body.sidebar { height: 100vh; min-height: 0; overflow: hidden; }
+.tabs { display: flex; border-bottom: 1px solid var(--line); background: var(--bg); }
+.tab { flex: 1; border: 0; background: transparent; color: var(--muted); font: inherit; font-weight: 600; font-size: 12.5px; padding: 9px 6px; cursor: pointer; border-bottom: 2px solid transparent; }
+.tab:hover { color: var(--fg); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab .cnt:not(:empty) { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px; background: var(--accent); color: var(--accent-fg); font-size: 11px; line-height: 18px; }
+.panel { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+.panel[hidden] { display: none; }
+.panel .rows { overflow: visible; flex: 0 0 auto; }
+.panel .jobs { flex: 0 0 auto; }
+body.sidebar .row .th { flex-basis: 80px; height: 45px; }
+body.sidebar .foot { border-top: 0; }
+body.sidebar .update { position: static; }
+body.sidebar .settings { max-height: 45vh; overflow: auto; }

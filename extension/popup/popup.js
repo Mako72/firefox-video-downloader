@@ -1,10 +1,14 @@
-'use strict';
+/* Liste der erkannten Videos – läuft im Popup und im Reiter „Videos“ der Seitenleiste. */
 /* global renderSettings, el, fmtBytes, fmtDur, jobProgress, jobStatus */
+(() => {
+'use strict';
+const IN_SIDEBAR = document.body.classList.contains('sidebar');
+let windowId = null;
+const autoDeepFor = new Set();
 
 let tabId = null;
 let tabTitle = '';
 let state = { groups: [], deep: 'idle', settings: {}, update: null };
-let autoDeepDone = false;
 const rows = new Map();
 
 const $list = document.getElementById('list');
@@ -20,6 +24,7 @@ const send = m => browser.runtime.sendMessage(m);
 // Hilfen
 // ---------------------------------------------------------------------------
 function openSidebar() {
+  if (IN_SIDEBAR) { if (window.vdlShowPanel) window.vdlShowPanel('downloads'); return; }
   // muss direkt im Klick-Handler aufgerufen werden (Nutzeraktion)
   browser.sidebarAction.open().catch(() => {});
 }
@@ -93,7 +98,9 @@ function render() {
   }
   $notice.hidden = !$notice.childNodes.length;
 
-  $count.textContent = groups.length === 1 ? '1 Video auf dieser Seite' : groups.length + ' Videos auf dieser Seite';
+  if ($count) $count.textContent = groups.length === 1 ? '1 Video auf dieser Seite' : groups.length + ' Videos auf dieser Seite';
+  const tc = document.getElementById('tabVideosCount');
+  if (tc) tc.textContent = groups.length ? String(groups.length) : '';
 
   const keep = new Set(groups.map(g => g.key));
   for (const [k, r] of rows) if (!keep.has(k)) { r.root.remove(); rows.delete(k); }
@@ -211,7 +218,7 @@ function updateRow(r, g) {
 }
 
 function startDownload(key, askWhere) {
-  if (state.settings.openSidebar) openSidebar();
+  if (state.settings.openSidebar && !IN_SIDEBAR) openSidebar();
   send({ type: 'download', tabId, key, askWhere: askWhere ? true : undefined }).then(refreshSoon);
 }
 
@@ -248,7 +255,7 @@ function openMenu(anchor, g) {
   kids.push(item('💾  Speichern unter …', () => startDownload(it.key, true), { disabled: block }));
   const audio = audioPossible(it);
   kids.push(item('🎵  Nur Ton herunterladen', () => {
-    if (state.settings.openSidebar) openSidebar();
+    if (state.settings.openSidebar && !IN_SIDEBAR) openSidebar();
     send({ type: 'download', tabId, key: it.key, audioOnly: true }).then(r => {
       if (r && r.error) toast(r.error); else toast('Ton-Download gestartet');
       refreshSoon();
@@ -266,7 +273,7 @@ function openMenu(anchor, g) {
     navigator.clipboard.writeText(it.url).then(() => toast('Adresse kopiert'), () => toast('Kopieren nicht möglich'));
   }));
   if (it.kind === 'direct') kids.push(item('▶  Vorschau im neuen Tab', () => browser.tabs.create({ url: it.url })));
-  kids.push(item('📋  Download-Seitenleiste', openSidebar));
+  kids.push(item(IN_SIDEBAR ? '📋  Zu den Downloads' : '📋  Download-Seitenleiste', openSidebar));
 
   $menu.replaceChildren(...kids);
   $menu.hidden = false;
@@ -286,8 +293,10 @@ function openMenu(anchor, g) {
 function startDeep() { send({ type: 'deepSearch', tabId }).then(refreshSoon); }
 
 $deep.addEventListener('click', startDeep);
-document.getElementById('side').addEventListener('click', () => { openSidebar(); window.close(); });
-document.getElementById('openSide').addEventListener('click', () => { openSidebar(); window.close(); });
+const $side = document.getElementById('side');
+if ($side) $side.addEventListener('click', () => { openSidebar(); if (!IN_SIDEBAR) window.close(); });
+const $openSide = document.getElementById('openSide');
+if ($openSide) $openSide.addEventListener('click', () => { openSidebar(); if (!IN_SIDEBAR) window.close(); });
 document.getElementById('gear').addEventListener('click', async () => {
   if ($settings.hidden) await renderSettings($settings);
   $settings.hidden = !$settings.hidden;
@@ -299,18 +308,44 @@ browser.runtime.onMessage.addListener(msg => {
 });
 browser.storage.onChanged.addListener(() => refreshSoon());
 
-(async () => {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+// ---------------------------------------------------------------------------
+// Start und Tab-Wechsel
+// ---------------------------------------------------------------------------
+async function showTab(tab) {
   if (!tab) return;
+  const changed = tab.id !== tabId;
   tabId = tab.id;
   tabTitle = tab.title || '';
+  if (changed) { for (const r of rows.values()) r.root.remove(); rows.clear(); closeMenu(); }
   await refresh();
   await send({ type: 'rescan', tabId }).catch(() => {});
+  const id = tabId;
   setTimeout(async () => {
+    if (id !== tabId) return;
     await refresh();
-    if (!state.groups.length && state.settings.autoDeep && state.deep === 'idle' && !autoDeepDone) {
-      autoDeepDone = true;
+    if (!state.groups.length && state.settings.autoDeep && state.deep === 'idle' && !autoDeepFor.has(id) && /^https?:/.test(tab.url || '')) {
+      autoDeepFor.add(id);
       startDeep();
     }
   }, 800);
+}
+
+(async () => {
+  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (tab) windowId = tab.windowId;
+  await showTab(tab);
+  if (IN_SIDEBAR) {
+    // Die Seitenleiste bleibt offen: dem aktiven Tab in diesem Fenster folgen
+    browser.tabs.onActivated.addListener(info => {
+      if (info.windowId !== windowId) return;
+      browser.tabs.get(info.tabId).then(showTab).catch(() => {});
+    });
+    browser.tabs.onUpdated.addListener((id, change, t) => {
+      if (id !== tabId) return;
+      if (change.title) tabTitle = change.title;
+      if (change.status === 'complete' || change.url) { autoDeepFor.delete(id); showTab(t); }
+      else if (change.title) render();
+    });
+  }
+})();
 })();

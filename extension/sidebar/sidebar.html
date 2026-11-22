@@ -6,20 +6,42 @@
   <link rel="stylesheet" href="sidebar.css">
 </head>
 <body class="sidebar">
-  <header>
+  <header class="topbar">
     <img src="../icons/icon.svg" alt="" class="logo">
-    <h1>Downloads</h1>
+    <h1>Video-Downloader</h1>
+    <button id="deep" class="ibtn" title="Tiefensuche – Seite gründlich nach versteckten Videos durchsuchen">🔍</button>
+    <button id="gear" class="ibtn" title="Einstellungen">⚙</button>
   </header>
-  <div class="toolbar">
-    <button id="pauseAll" class="btn ghost small">⏸ Alle pausieren</button>
-    <button id="resumeAll" class="btn ghost small">▶ Alle fortsetzen</button>
-    <button id="clear" class="btn ghost small">🧹 Erledigte entfernen</button>
-  </div>
-  <div id="summary" class="summary"></div>
-  <ul id="jobs" class="jobs"></ul>
+  <section id="settings" class="settings" hidden></section>
+
+  <nav class="tabs">
+    <button id="tabVideos" class="tab active" data-panel="videos">Videos <span id="tabVideosCount" class="cnt"></span></button>
+    <button id="tabDownloads" class="tab" data-panel="downloads">Downloads <span id="tabDownloadsCount" class="cnt"></span></button>
+  </nav>
+
+  <section id="panelVideos" class="panel">
+    <div id="notice" class="notice" hidden></div>
+    <ul id="list" class="rows"></ul>
+    <div class="foot"><span id="count"></span></div>
+  </section>
+
+  <section id="panelDownloads" class="panel" hidden>
+    <div class="toolbar">
+      <button id="pauseAll" class="btn ghost small">⏸ Alle pausieren</button>
+      <button id="resumeAll" class="btn ghost small">▶ Alle fortsetzen</button>
+      <button id="clear" class="btn ghost small">🧹 Erledigte entfernen</button>
+    </div>
+    <div id="summary" class="summary"></div>
+    <ul id="jobs" class="jobs"></ul>
+  </section>
+
   <footer id="update" class="update"></footer>
+  <div id="menu" class="menu" hidden></div>
+
   <script src="../settings.js"></script>
   <script src="../ui-common.js"></script>
+  <script src="tabs.js"></script>
   <script src="sidebar.js"></script>
+  <script src="../popup/popup.js"></script>
 </body>
 </html>

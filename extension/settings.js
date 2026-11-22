@@ -2,7 +2,7 @@
 'use strict';
 const VDL_DEFAULTS = {
   subfolder: 'Videos', askWhere: false, autoDeep: true, showAll: false, minSizeKB: 300,
-  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true
+  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar'
 };
 
 function el(tag, attrs, ...kids) {
@@ -44,9 +44,17 @@ async function renderSettings(root) {
   par.value = s.maxParallel;
   par.addEventListener('change', () => save('maxParallel', Math.min(6, Math.max(1, parseInt(par.value, 10) || 2))));
 
+  const act = el('select', { id: 'set-act' },
+    el('option', { value: 'sidebar', text: 'die Seitenleiste (mit erkannten Videos)' }),
+    el('option', { value: 'popup', text: 'ein kleines Fenster' }));
+  act.value = s.iconAction;
+  act.addEventListener('change', () => save('iconAction', act.value));
+
   const saved = el('span', { class: 'set-saved' });
 
   root.replaceChildren(
+    el('label', { class: 'set-label', for: 'set-act', text: 'Klick auf das Symbol öffnet' }),
+    act,
     el('label', { class: 'set-label', for: 'set-folder', text: 'Download-Ordner' }),
     folder,
     el('p', { class: 'set-hint', text: 'Unterordner innerhalb deines Firefox-Download-Ordners. Leer lassen = direkt in den Download-Ordner. Den Hauptordner selbst änderst du in Firefox unter Einstellungen → Allgemein → Dateien und Anwendungen → Downloads.' }),
