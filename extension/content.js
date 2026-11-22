@@ -207,5 +207,17 @@
   browser.runtime.onMessage.addListener(msg => {
     if (msg.type === 'scan') { lastSig = ''; return scan(false).then(() => true); }
     if (msg.type === 'deepScan') return scan(true).then(() => true);
+    if (msg.type === 'pageFetch') {
+      // Lädt als die Seite selbst: gleiche Cookies, gleicher Referer, gleiche Herkunft
+      const f = (typeof content !== 'undefined' && content.fetch) ? content.fetch.bind(content) : fetch;
+      const headers = {};
+      if (msg.range) headers.Range = 'bytes=' + msg.range.start + '-' + msg.range.end;
+      return f(msg.url, { credentials: 'include', headers, cache: 'no-store' })
+        .then(async r => {
+          if (!r.ok) return { ok: false, status: r.status };
+          return msg.text ? { ok: true, status: r.status, text: await r.text() } : { ok: true, status: r.status, buf: await r.arrayBuffer() };
+        })
+        .catch(e => ({ ok: false, status: 0, error: String(e && e.message || e) }));
+    }
   });
 })();

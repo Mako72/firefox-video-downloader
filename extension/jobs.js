@@ -150,7 +150,7 @@ async function createJob(tabId, key) {
     created: Date.now(), state: 'queued', phase: '', note: '', error: '',
     done: 0, total: 0, bytes: 0, estTotal: it.size || 0, speed: 0, eta: 0,
     retries: 0, restarts: 0, refreshes: 0, retryAt: 0, tracks: null, downloadId: null,
-    askWhere: !!settings.askWhere
+    askWhere: !!settings.askWhere, frameId: it.frameId || 0, viaPage: !!it.viaPage
   };
   jobs.set(job.id, job);
   await persist(job, true);
@@ -301,17 +301,17 @@ function permanent(msg) { const e = new Error(msg); e.permanent = true; return e
 
 async function resolveTracks(job) {
   if (job.kind === 'hls') {
-    const pl = VDL.parseM3U8(await fetchText(job.source), job.source);
+    const pl = VDL.parseM3U8(await jobFetchText(job, job.source), job.source);
     let media = pl, audio = null;
     if (pl.type === 'master') {
       const best = pl.variants[0];
       if (!best) throw permanent('Playlist ohne Varianten');
-      media = VDL.parseM3U8(await fetchText(best.url), best.url);
+      media = VDL.parseM3U8(await jobFetchText(job, best.url), best.url);
       if (best.height) job.label = best.height + 'p';
       if (best.audioGroup) {
         const cands = pl.audio.filter(a => a.group === best.audioGroup);
         const pick = cands.find(a => a.isDefault) || cands[0];
-        if (pick) audio = VDL.parseM3U8(await fetchText(pick.url), pick.url);
+        if (pick) audio = VDL.parseM3U8(await jobFetchText(job, pick.url), pick.url);
       }
     }
     if (media.encrypted || (audio && audio.encrypted) || pl.encrypted) throw permanent('Verschlüsselter Stream – Download nicht möglich');
@@ -323,7 +323,7 @@ async function resolveTracks(job) {
     return tracks;
   }
   if (job.kind === 'dash') {
-    const mpd = VDL.parseMPD(await fetchText(job.source), job.source);
+    const mpd = VDL.parseMPD(await jobFetchText(job, job.source), job.source);
     if (mpd.live) throw permanent('Live-Stream – wird nicht unterstützt');
     const v = mpd.video.find(r => !r.protected);
     const a = mpd.audio.find(r => !r.protected);
@@ -337,16 +337,67 @@ async function resolveTracks(job) {
   throw permanent('Unbekannter Typ');
 }
 
-async function fetchPart(p, signal) {
+// Anfrage über den geöffneten Tab (mit den Cookies, dem Referer und der Herkunft der Seite).
+// Nötig, wenn der Server Hintergrund-Anfragen ablehnt (z. B. Cookie-Trennung pro Website, Hotlink-Schutz).
+async function pageFetch(job, url, range, asText) {
+  if (!job.injected) { await ensureInjected(job.tabId); job.injected = true; }
+  const msg = { type: 'pageFetch', url, range: range || null, text: !!asText };
+  let res;
+  try {
+    res = await browser.tabs.sendMessage(job.tabId, msg, { frameId: job.frameId || 0 });
+  } catch (e) {
+    if (job.frameId) {
+      try { res = await browser.tabs.sendMessage(job.tabId, msg, { frameId: 0 }); } catch (e2) { res = null; }
+    }
+  }
+  if (!res) {
+    const e = new Error('Seite nicht erreichbar – bitte den Tab mit dem Video geöffnet lassen');
+    e.noPage = true;
+    throw e;
+  }
+  if (!res.ok) { const e = new Error('HTTP ' + (res.status || 0) + (res.error ? ' ' + res.error : '')); e.status = res.status; e.viaPage = true; throw e; }
+  return asText ? res.text : new Uint8Array(res.buf);
+}
+
+function switchToPage(job) {
+  if (job.viaPage) return;
+  job.viaPage = true;
+  job.note = 'Der Server lässt nur die Seite selbst laden – Download läuft über den geöffneten Tab. Bitte den Tab offen lassen.';
+  persist(job, true);
+  notifyJobs(job);
+}
+
+async function jobFetchText(job, url) {
+  if (job.viaPage) return pageFetch(job, url, null, true);
+  try {
+    return await fetchText(url);
+  } catch (e) {
+    if (!/HTTP (401|403)/.test(e.message)) throw e;
+    const t = await pageFetch(job, url, null, true);
+    switchToPage(job);
+    return t;
+  }
+}
+
+async function fetchPart(p, signal, job) {
   for (let attempt = 0; ; attempt++) {
     try {
+      if (job && job.viaPage) return await pageFetch(job, p.url, p.range);
       const headers = {};
       if (p.range) headers.Range = 'bytes=' + p.range.start + '-' + p.range.end;
       const r = await fetch(p.url, { signal, headers, credentials: 'include' });
-      if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+      if (!r.ok) {
+        if (job && (r.status === 401 || r.status === 403)) {
+          // Zweiter Weg: über die Seite laden
+          const u8 = await pageFetch(job, p.url, p.range).catch(() => null);
+          if (u8) { switchToPage(job); return u8; }
+        }
+        const e = new Error('HTTP ' + r.status); e.status = r.status; throw e;
+      }
       return new Uint8Array(await r.arrayBuffer());
     } catch (e) {
-      if (e.name === 'AbortError') throw e;
+      if (e.name === 'AbortError' || e.noPage) throw e;
+      if (signal && signal.aborted) throw e;
       const clientErr = e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
       if (clientErr || attempt >= 3) throw e;
       await sleep(800 * (attempt + 1));
@@ -357,6 +408,7 @@ async function fetchPart(p, signal) {
 function abortError() { const e = new Error('Abgebrochen'); e.name = 'AbortError'; return e; }
 
 async function runStream(job) {
+  job.injected = false;
   const r = { ctrl: new AbortController(), reason: null };
   rt.set(job.id, r);
   speedState.delete(job.id);
@@ -399,7 +451,7 @@ async function fetchMissing(job, r) {
   const worker = async () => {
     while (next < todo.length && !r.ctrl.signal.aborted) {
       const t = todo[next++];
-      const u8 = await fetchPart(t.p, r.ctrl.signal);
+      const u8 = await fetchPart(t.p, r.ctrl.signal, job);
       if (r.ctrl.signal.aborted) return;
       await VDLStore.putPart(job.id, t.ti, t.i, new Blob([u8]));
       job.done++;
@@ -425,6 +477,7 @@ async function handleStreamError(job, e, r) {
   }
   job.phase = '';
   if (e.permanent) return setState(job, 'error', { error: e.message, permanent: true });
+  if (e.noPage) return setState(job, 'interrupted', { error: e.message, retryAt: 0 });
   if (e.saveCancelled) return setState(job, 'paused', { note: 'Speichern abgebrochen – „Fortsetzen“ speichert die fertige Datei erneut.' });
   if (e.status && [401, 403, 404, 410].includes(e.status)) {
     // Download-Adressen sind womöglich abgelaufen: Playlist neu lesen
@@ -446,7 +499,7 @@ async function handleStreamError(job, e, r) {
     } else if ((job.restarts || 0) < 1) {
       return restartFromScratch(job, 'Fortsetzen nicht möglich – Download wurde neu gestartet.');
     } else {
-      return setState(job, 'error', { error: 'Server verweigert den Zugriff (' + e.message + '). Seite neu laden und das Video erneut herunterladen.' });
+      return setState(job, 'error', { error: 'Server verweigert den Zugriff (' + e.message + '), auch beim Laden über die Seite. Seite neu laden, das Video kurz abspielen und dann erneut herunterladen.' });
     }
   }
   scheduleRetry(job, (e && e.message) || 'Verbindungsfehler');

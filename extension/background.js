@@ -57,6 +57,7 @@ function addItem(tabId, d) {
   if (d.height && !it.height) it.height = d.height;
   if (d.thumb && !it.thumb) it.thumb = d.thumb;
   if (d.groupHint && !it.groupHint) it.groupHint = d.groupHint;
+  if (d.frameId && !it.frameId) it.frameId = d.frameId;
   if (d.label) {
     const q = VDL.qualityFromString(d.label);
     if (q.rank && !it.height) { it.height = q.height; it.rank = q.rank; it.label = q.label; }
@@ -97,7 +98,7 @@ browser.webRequest.onHeadersReceived.addListener(d => {
   if (cr) size = +cr[1];
   const st = tabState(d.tabId);
   if (kind === 'segment') { st.sawSegments = true; return; }
-  addItem(d.tabId, { url: d.url, kind, ct, size, source: 'network', pageUrl: d.documentUrl || st.pageUrl });
+  addItem(d.tabId, { url: d.url, kind, ct, size, source: 'network', pageUrl: d.documentUrl || st.pageUrl, frameId: d.frameId || 0 });
 }, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'object', 'other', 'main_frame', 'sub_frame'] }, ['responseHeaders']);
 
 // Referer für eigene Anfragen (Analyse und Downloads) setzen – manche Server verlangen ihn.
@@ -109,6 +110,11 @@ browser.webRequest.onBeforeSendHeaders.addListener(d => {
   if (!ref) return;
   const headers = d.requestHeaders.filter(h => h.name.toLowerCase() !== 'referer');
   headers.push({ name: 'Referer', value: ref });
+  // Herkunft "moz-extension://…" durch die der Seite ersetzen (Hotlink-Schutz)
+  const origin = headers.find(h => h.name.toLowerCase() === 'origin');
+  if (origin && /^moz-extension:/i.test(origin.value)) {
+    try { origin.value = new URL(ref).origin; } catch (e) { /* ignore */ }
+  }
   return { requestHeaders: headers };
 }, { urls: ['<all_urls>'] }, ['blocking', 'requestHeaders']);
 
@@ -406,7 +412,7 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       for (const d of msg.items || []) {
         const kind = VDL.classify(d.url, d.type || '') || (d.isVideoSrc ? 'direct' : null);
         if (!kind || kind === 'segment') continue;
-        addItem(tabId, Object.assign({}, d, { kind, source: msg.deep ? 'deep' : 'dom', pageUrl: msg.pageUrl }));
+        addItem(tabId, Object.assign({}, d, { kind, source: msg.deep ? 'deep' : 'dom', pageUrl: msg.pageUrl, frameId: sender.frameId || 0 }));
       }
       scheduleUpdate(tabId);
       return;
