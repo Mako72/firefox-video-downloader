@@ -40,9 +40,12 @@ async function renderSettings(root) {
   min.value = s.minSizeKB;
   min.addEventListener('change', () => save('minSizeKB', Math.max(0, parseInt(min.value, 10) || 0)));
 
-  const par = el('input', { type: 'number', min: '1', max: '6', step: '1', id: 'set-par' });
-  par.value = s.maxParallel;
-  par.addEventListener('change', () => save('maxParallel', Math.min(6, Math.max(1, parseInt(par.value, 10) || 2))));
+  const par = el('select', { id: 'set-par' },
+    ...[1, 2, 3, 4, 5, 6, 8, 10].map(n => el('option', { value: String(n), text: String(n) })),
+    el('option', { value: '0', text: 'Unbegrenzt' }));
+  par.value = String(s.maxParallel);
+  if (par.value === '') par.value = '2';
+  par.addEventListener('change', () => save('maxParallel', parseInt(par.value, 10)));
 
   const act = el('select', { id: 'set-act' },
     el('option', { value: 'sidebar', text: 'die Seitenleiste (mit erkannten Videos)' }),
@@ -97,6 +100,7 @@ async function renderSettings(root) {
     el('p', { class: 'set-hint', text: 'Gilt für fertige und abgebrochene Downloads. Die gespeicherten Dateien bleiben erhalten.' }),
     el('label', { class: 'set-label', for: 'set-par', text: 'Gleichzeitige Downloads' }),
     par,
+    el('p', { class: 'set-hint', text: 'Weitere Downloads warten in der Schlange. Bei „Unbegrenzt“ starten alle sofort – Firefox selbst lädt aber höchstens etwa 6 Verbindungen gleichzeitig vom selben Server, sehr viele Downloads teilen sich also die Bandbreite.' }),
     el('label', { class: 'set-label', for: 'set-min', text: 'Dateien kleiner als (KB) ausblenden' }),
     min,
     saved

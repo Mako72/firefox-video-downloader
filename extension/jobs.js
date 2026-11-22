@@ -184,7 +184,10 @@ async function createJob(tabId, key, opts) {
 
 function pumpJobs() {
   const all = [...jobs.values()];
-  let free = Math.max(1, +settings.maxParallel || 2) - all.filter(j => ACTIVE.has(j.state)).length;
+  // 0 = unbegrenzt
+  const mp = parseInt(settings.maxParallel, 10);
+  const limit = mp === 0 ? Infinity : Math.max(1, mp || 2);
+  let free = limit - all.filter(j => ACTIVE.has(j.state)).length;
   const queued = all.filter(j => j.state === 'queued').sort((a, b) => a.created - b.created);
   for (const j of queued) {
     if (free <= 0) break;
@@ -281,7 +284,11 @@ function scheduleRetry(job, msg) {
   }, delay));
 }
 
-browser.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.autoClear) setTimeout(() => sweepFinished(false), 100); });
+browser.storage.onChanged.addListener((ch, area) => {
+  if (area !== 'local') return;
+  if (ch.autoClear) setTimeout(() => sweepFinished(false), 100);
+  if (ch.maxParallel) setTimeout(pumpJobs, 100); // mehr Plätze frei → Wartende sofort starten
+});
 
 // Sobald das Netz wieder da ist: unterbrochene Downloads sofort fortsetzen
 window.addEventListener('online', () => {
