@@ -9,7 +9,7 @@
   },
   "browser_specific_settings": {
     "gecko": {
-      "id": "video-downloader@mako72",
+      "id": "{07b4a90b-a676-462d-9600-a135be0b64ad}",
       "strict_min_version": "140.0",
       "update_url": "https://raw.githubusercontent.com/Mako72/firefox-video-downloader/main/updates.json",
       "data_collection_permissions": {
