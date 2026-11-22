@@ -52,14 +52,30 @@ jobs:
         if: steps.check.outputs.exists == 'false'
         id: keys
         env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          S_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          S_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          V_ISSUER: ${{ vars.AMO_JWT_ISSUER }}
+          V_SECRET: ${{ vars.AMO_JWT_SECRET }}
         run: |
-          if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ]; then
+          ISSUER="$S_ISSUER"; SECRET="$S_SECRET"
+          echo "Diagnose:"
+          [ -n "$S_ISSUER" ] && echo "  AMO_JWT_ISSUER als Repository-Secret: gefunden" || echo "  AMO_JWT_ISSUER als Repository-Secret: FEHLT"
+          [ -n "$S_SECRET" ] && echo "  AMO_JWT_SECRET als Repository-Secret: gefunden" || echo "  AMO_JWT_SECRET als Repository-Secret: FEHLT"
+          [ -n "$V_ISSUER" ] && echo "  AMO_JWT_ISSUER als Variable: gefunden" || echo "  AMO_JWT_ISSUER als Variable: -"
+          [ -n "$V_SECRET" ] && echo "  AMO_JWT_SECRET als Variable: gefunden" || echo "  AMO_JWT_SECRET als Variable: -"
+          if [ -z "$ISSUER" ] && [ -n "$V_ISSUER" ]; then ISSUER="$V_ISSUER"; echo "::warning::AMO_JWT_ISSUER liegt unter 'Variables' statt 'Secrets' – wird trotzdem verwendet."; fi
+          if [ -z "$SECRET" ] && [ -n "$V_SECRET" ]; then SECRET="$V_SECRET"; echo "::add-mask::$V_SECRET"; echo "::warning::AMO_JWT_SECRET liegt unter 'Variables' (für alle sichtbar!). Bitte als Secret anlegen und die Variable löschen."; fi
+          # führende/abschließende Leerzeichen entfernen (häufiger Kopierfehler)
+          ISSUER="$(echo -n "$ISSUER" | tr -d '[:space:]')"; SECRET="$(echo -n "$SECRET" | tr -d '[:space:]')"
+          if [ -n "$ISSUER" ] && [ -n "$SECRET" ]; then
+            echo "::add-mask::$SECRET"
+            case "$ISSUER" in user:*) ;; *) echo "::warning::AMO_JWT_ISSUER sollte mit 'user:' beginnen (z. B. user:12345678:123). Bitte prüfen, ob Aussteller und Geheimnis vertauscht sind.";; esac
+            echo "AMO_JWT_ISSUER=$ISSUER" >> "$GITHUB_ENV"
+            echo "AMO_JWT_SECRET=$SECRET" >> "$GITHUB_ENV"
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Keine Mozilla-Schlüssel (AMO_JWT_ISSUER / AMO_JWT_SECRET) hinterlegt. Es wurde nur eine unsignierte Datei als Artefakt erstellt. Anleitung: README → Einmalige Einrichtung."
+            echo "::warning::Keine Mozilla-Schlüssel gefunden (Diagnose im Schritt 'Schlüssel vorhanden?'). Sie müssen unter Settings → Secrets and variables → Actions → Reiter 'Secrets' → 'Repository secrets' als AMO_JWT_ISSUER und AMO_JWT_SECRET angelegt sein."
           fi
 
       - uses: actions/setup-node@v4
@@ -69,9 +85,6 @@ jobs:
 
       - name: Bei Mozilla signieren
         if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
-        env:
-          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
-          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
         run: |
           mkdir -p signed
           npx --yes web-ext@8 sign \
