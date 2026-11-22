@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img src="../icons/icon.svg" alt="" class="logo">
+    <h1>Video-Downloader</h1>
+    <button id="deep" class="btn ghost" title="Seite gründlich nach versteckten Videos durchsuchen">🔍 Tiefensuche</button>
+    <button id="side" class="btn ghost icon" title="Download-Seitenleiste öffnen (Alt+Umschalt+V)">📋</button>
+    <button id="gear" class="btn ghost icon" title="Einstellungen">⚙</button>
+  </header>
+  <section id="settings" class="settings" hidden></section>
+  <div id="status" class="status"></div>
+  <ul id="list" class="list"></ul>
+  <script src="../settings.js"></script>
+  <script src="../ui-common.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

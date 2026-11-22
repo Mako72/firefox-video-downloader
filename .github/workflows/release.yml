@@ -1,0 +1,117 @@
+name: Release
+
+# Baut die Erweiterung, lässt sie bei Mozilla signieren (unlisted), veröffentlicht sie als
+# GitHub-Release und trägt die Version in updates.json ein. Firefox installiert sie dann automatisch.
+on:
+  push:
+    branches: [main]
+    paths: ['extension/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version lesen
+        id: v
+        run: echo "version=$(jq -r .version extension/manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Prüfen, ob es diese Version schon gibt
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version ${{ steps.v.outputs.version }} ist bereits veröffentlicht – nichts zu tun. Für ein Update die Versionsnummer in extension/manifest.json erhöhen."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Unsignierte Erweiterung packen
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          (cd extension && zip -qr -X "../dist/video-downloader-${{ steps.v.outputs.version }}-unsigniert.xpi" .)
+
+      - name: Unsignierte Datei als Artefakt bereitstellen
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-downloader-${{ steps.v.outputs.version }}-unsigniert
+          path: dist/*-unsigniert.xpi
+
+      - name: Schlüssel vorhanden?
+        if: steps.check.outputs.exists == 'false'
+        id: keys
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -n "$AMO_JWT_ISSUER" ] && [ -n "$AMO_JWT_SECRET" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Keine Mozilla-Schlüssel (AMO_JWT_ISSUER / AMO_JWT_SECRET) hinterlegt. Es wurde nur eine unsignierte Datei als Artefakt erstellt. Anleitung: README → Einmalige Einrichtung."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
+        with:
+          node-version: 20
+
+      - name: Bei Mozilla signieren
+        if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          mkdir -p signed
+          npx --yes web-ext@8 sign \
+            --source-dir extension \
+            --artifacts-dir signed \
+            --channel unlisted \
+            --api-key "$AMO_JWT_ISSUER" \
+            --api-secret "$AMO_JWT_SECRET" \
+            --approval-timeout 1800000
+          f=$(ls signed/*.xpi | head -n1)
+          mv "$f" "dist/video-downloader-${{ steps.v.outputs.version }}.xpi"
+
+      - name: Release veröffentlichen
+        if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          FILE="dist/video-downloader-$V.xpi"
+          gh release create "v$V" --title "Version $V" \
+            --notes "Signierte Firefox-Erweiterung. Datei anklicken bzw. in Firefox öffnen, um sie zu installieren. Bereits installierte Versionen aktualisieren sich automatisch."
+          # Mit dem richtigen Dateityp hochladen, damit Firefox beim Anklicken direkt die Installation anbietet
+          UPLOAD=$(gh api "repos/${{ github.repository }}/releases/tags/v$V" --jq .upload_url | sed 's/{.*}//')
+          curl -sSf -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Content-Type: application/x-xpinstall" \
+            --data-binary @"$FILE" \
+            "$UPLOAD?name=video-downloader-$V.xpi" > /dev/null
+
+      - name: Update-Liste aktualisieren
+        if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          ID=$(jq -r .browser_specific_settings.gecko.id extension/manifest.json)
+          LINK="https://github.com/${{ github.repository }}/releases/download/v$V/video-downloader-$V.xpi"
+          jq --arg id "$ID" --arg v "$V" --arg l "$LINK" \
+            '.addons[$id].updates = ([(.addons[$id].updates // [])[] | select(.version != $v)] + [{version: $v, update_link: $l}])' \
+            updates.json > updates.tmp && mv updates.tmp updates.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add updates.json
+          git commit -m "updates.json: Version $V veröffentlicht"
+          git push

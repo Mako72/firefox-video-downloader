@@ -1,0 +1,723 @@
+'use strict';
+/* Download-Aufträge: Warteschlange, Fortsetzen an der Abbruchstelle, automatische Wiederaufnahme,
+ * Pausieren/Abbrechen, Fortschritt und Restzeit.
+ * global VDL, VDLMp4, VDLStore, settings, settingsReady, tabs, rememberReferer, fetchText, scheduleUpdate, maybeApplyUpdate */
+
+const jobs = new Map();        // id -> Auftrag (wird in IndexedDB gespeichert)
+const rt = new Map();          // id -> Laufzeitdaten eines Stream-Downloads {ctrl, reason, lastBytes, lastTime}
+const dlToJob = new Map();     // Firefox-Download-ID -> Auftrags-ID
+const retryTimers = new Map();
+const speedState = new Map();
+const ACTIVE = new Set(['running', 'merging']);
+const FINAL = new Set(['done', 'cancelled', 'error']);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Hilfsfunktionen für Dateinamen
+// ---------------------------------------------------------------------------
+function sanitize(name) {
+  return String(name)
+    .replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s.]+|[\s.]+$/g, '')
+    .slice(0, 120) || 'video';
+}
+function buildPath(filename) {
+  const folder = String(settings.subfolder || '').split(/[\\/]+/).map(s => s.trim()).filter(Boolean)
+    .map(s => s.replace(/[:*?"<>|\u0000-\u001f]+/g, '_').replace(/^\.+$/, '_')).join('/');
+  return folder ? folder + '/' + filename : filename;
+}
+function extFromCt(ct) {
+  ct = (ct || '').toLowerCase();
+  if (ct.includes('webm')) return 'webm';
+  if (ct.includes('ogg')) return 'ogv';
+  if (ct.includes('quicktime')) return 'mov';
+  if (ct.includes('x-flv')) return 'flv';
+  if (ct.includes('matroska')) return 'mkv';
+  if (ct.includes('mp4')) return 'mp4';
+  return '';
+}
+function baseName(title, label) {
+  let t = sanitize(title || 'video');
+  if (label) t += ' [' + label + ']';
+  return t;
+}
+function sniffExt(u8, audio) {
+  if (!u8 || u8.length < 8) return audio ? 'aac' : 'ts';
+  if (u8[0] === 0x47) return 'ts';
+  const t = String.fromCharCode(u8[4], u8[5], u8[6], u8[7]);
+  if (['ftyp', 'styp', 'moof', 'moov', 'sidx'].includes(t)) return audio ? 'm4a' : 'mp4';
+  if (u8[0] === 0x1a && u8[1] === 0x45) return audio ? 'weba' : 'webm';
+  if (audio && (u8[0] === 0x49 || (u8[0] === 0xff && (u8[1] & 0xf0) === 0xf0))) return 'aac';
+  return audio ? 'aac' : 'ts';
+}
+const MIME = { mp4: 'video/mp4', m4a: 'audio/mp4', ts: 'video/mp2t', aac: 'audio/aac', webm: 'video/webm', weba: 'audio/webm' };
+const DL_ERRORS = {
+  NETWORK_FAILED: 'Netzwerkfehler', NETWORK_TIMEOUT: 'Zeitüberschreitung', NETWORK_DISCONNECTED: 'Verbindung getrennt',
+  NETWORK_SERVER_DOWN: 'Server nicht erreichbar', SERVER_FAILED: 'Serverfehler', SERVER_BAD_CONTENT: 'Ungültige Antwort',
+  SERVER_UNAUTHORIZED: 'Keine Berechtigung', SERVER_FORBIDDEN: 'Zugriff verweigert', SERVER_UNREACHABLE: 'Server nicht erreichbar',
+  FILE_FAILED: 'Dateifehler', FILE_ACCESS_DENIED: 'Kein Schreibzugriff', FILE_NO_SPACE: 'Kein Speicherplatz',
+  FILE_TOO_LARGE: 'Datei zu groß', CRASH: 'Absturz'
+};
+
+// ---------------------------------------------------------------------------
+// Speichern und Benachrichtigen
+// ---------------------------------------------------------------------------
+const dirty = new Set();
+let saveTimer = null;
+function persist(job, now) {
+  dirty.add(job.id);
+  if (now) return flush();
+  if (!saveTimer) saveTimer = setTimeout(flush, 1500);
+  return Promise.resolve();
+}
+async function flush() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const ids = [...dirty];
+  dirty.clear();
+  for (const id of ids) {
+    const j = jobs.get(id);
+    if (j) await VDLStore.putJob(j).catch(e => console.warn('Speichern fehlgeschlagen', e));
+  }
+}
+
+let notifyTimer = null;
+function notifyJobs(job) {
+  if (job && job.tabId != null && tabs.has(job.tabId)) scheduleUpdate(job.tabId);
+  if (notifyTimer) return;
+  notifyTimer = setTimeout(() => {
+    notifyTimer = null;
+    browser.runtime.sendMessage({ type: 'jobsUpdated' }).catch(() => {});
+    const active = [...jobs.values()].filter(j => ACTIVE.has(j.state) || j.state === 'queued').length;
+    browser.sidebarAction.setTitle({ title: active ? 'Video-Downloads (' + active + ' aktiv)' : 'Video-Downloads' }).catch(() => {});
+  }, 300);
+}
+
+function setState(job, state, extra) {
+  job.state = state;
+  Object.assign(job, extra || {});
+  if (FINAL.has(state)) job.finished = Date.now();
+  if (state !== 'running' && state !== 'merging') { job.speed = 0; job.eta = 0; }
+  if (state !== 'interrupted') job.retryAt = 0;
+  persist(job, true);
+  notifyJobs(job);
+  if (!ACTIVE.has(state) && typeof maybeApplyUpdate === 'function') setTimeout(maybeApplyUpdate, 500);
+}
+
+function jobPub(j) {
+  if (!j) return null;
+  return {
+    id: j.id, kind: j.kind, title: j.title, label: j.label, base: j.base, filename: j.filename, thumb: j.thumb,
+    state: j.state, error: j.error, note: j.note, phase: j.phase, done: j.done, total: j.total, bytes: j.bytes,
+    estTotal: j.estTotal, speed: j.speed, eta: j.eta, retryAt: j.retryAt, created: j.created, finished: j.finished,
+    downloadId: j.downloadId, restarts: j.restarts, itemKey: j.itemKey, source: j.source, pageUrl: j.pageUrl
+  };
+}
+function jobForItem(key) {
+  let best = null;
+  for (const j of jobs.values()) if (j.itemKey === key && (!best || j.created > best.created)) best = j;
+  return jobPub(best);
+}
+
+// ---------------------------------------------------------------------------
+// Auftrag anlegen und Warteschlange
+// ---------------------------------------------------------------------------
+async function createJob(tabId, key) {
+  const st = tabs.get(tabId);
+  const it = st && st.items.get(key);
+  if (!it) throw new Error('Video nicht mehr vorhanden – Seite neu laden');
+  for (const j of jobs.values()) {
+    if (j.source === it.url && !FINAL.has(j.state)) {
+      if (!ACTIVE.has(j.state)) resumeJob(j.id);
+      return j;
+    }
+  }
+  const tab = await browser.tabs.get(tabId).catch(() => null);
+  const title = (tab && tab.title) || 'video';
+  let ext = 'mp4';
+  if (it.kind === 'direct') {
+    const e = VDL.getExt(it.url);
+    ext = VDL.VIDEO_EXT.has(e) ? e : (extFromCt(it.ct) || 'mp4');
+  }
+  const thumb = it.thumb || st.pageThumb || null;
+  const job = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    kind: it.kind, source: it.url, itemKey: it.key, tabId,
+    pageUrl: st.pageUrl || (tab && tab.url) || '', title, label: it.label || '',
+    base: baseName(title, it.label), ext, filename: '',
+    thumb: thumb && thumb.length < 120000 ? thumb : null,
+    created: Date.now(), state: 'queued', phase: '', note: '', error: '',
+    done: 0, total: 0, bytes: 0, estTotal: it.size || 0, speed: 0, eta: 0,
+    retries: 0, restarts: 0, refreshes: 0, retryAt: 0, tracks: null, downloadId: null,
+    askWhere: !!settings.askWhere
+  };
+  jobs.set(job.id, job);
+  await persist(job, true);
+  notifyJobs(job);
+  pumpJobs();
+  return job;
+}
+
+function pumpJobs() {
+  const all = [...jobs.values()];
+  let free = Math.max(1, +settings.maxParallel || 2) - all.filter(j => ACTIVE.has(j.state)).length;
+  const queued = all.filter(j => j.state === 'queued').sort((a, b) => a.created - b.created);
+  for (const j of queued) {
+    if (free <= 0) break;
+    free--;
+    runJob(j);
+  }
+}
+
+function runJob(job) {
+  job.phase = '';
+  job.error = '';
+  setState(job, 'running');
+  if (job.kind === 'direct') runDirect(job);
+  else runStream(job);
+}
+
+// ---------------------------------------------------------------------------
+// Steuerung: Pause, Fortsetzen, Abbrechen, Entfernen
+// ---------------------------------------------------------------------------
+function resumeJob(id) {
+  const j = jobs.get(id);
+  if (!j || ACTIVE.has(j.state)) return;
+  clearTimeout(retryTimers.get(id));
+  retryTimers.delete(id);
+  if (j.state === 'done') return;
+  if (j.state === 'cancelled' || j.state === 'error') {
+    // Neu starten
+    j.retries = 0; j.refreshes = 0; j.note = ''; j.error = ''; j.permanent = false;
+    if (j.state === 'cancelled') { j.tracks = null; j.done = 0; j.bytes = 0; j.total = 0; j.downloadId = null; }
+  }
+  if (j.state === 'interrupted') j.retries = 0;
+  setState(j, 'queued');
+  pumpJobs();
+}
+
+async function pauseJob(id) {
+  const j = jobs.get(id);
+  if (!j) return;
+  clearTimeout(retryTimers.get(id));
+  if (j.kind === 'direct' && j.state === 'running' && j.downloadId != null) {
+    j.pausing = true;
+    await browser.downloads.pause(j.downloadId).catch(() => {});
+    j.pausing = false;
+    setState(j, 'paused');
+    pumpJobs();
+    return;
+  }
+  const r = rt.get(id);
+  if (r && j.state === 'running') { r.reason = 'pause'; r.ctrl.abort(); return; }
+  if (j.state === 'queued' || j.state === 'interrupted') setState(j, 'paused');
+}
+
+async function cancelJob(id) {
+  const j = jobs.get(id);
+  if (!j || FINAL.has(j.state)) return;
+  clearTimeout(retryTimers.get(id));
+  if (j.kind === 'direct') {
+    if (j.downloadId != null) {
+      j.userCancel = true;
+      await browser.downloads.cancel(j.downloadId).catch(() => {});
+    }
+    setState(j, 'cancelled', { note: '' });
+    pumpJobs();
+    return;
+  }
+  const r = rt.get(id);
+  if (r) { r.reason = 'cancel'; r.ctrl.abort(); return; }
+  await VDLStore.deleteParts(id).catch(() => {});
+  setState(j, 'cancelled', { tracks: null, done: 0, bytes: 0, note: '' });
+}
+
+async function removeJob(id) {
+  const j = jobs.get(id);
+  if (!j) return;
+  if (!FINAL.has(j.state)) await cancelJob(id);
+  if (rt.has(id)) await sleep(300);
+  await VDLStore.deleteParts(id).catch(() => {});
+  await VDLStore.deleteJob(id).catch(() => {});
+  jobs.delete(id);
+  notifyJobs(j);
+}
+
+function scheduleRetry(job, msg) {
+  if (!settings.autoResume) return setState(job, 'interrupted', { error: msg, retryAt: 0 });
+  job.retries = (job.retries || 0) + 1;
+  if (job.retries > 30) return setState(job, 'interrupted', { error: msg + ' – automatische Versuche beendet', retryAt: 0 });
+  const delay = Math.min(300, 5 * Math.pow(2, job.retries - 1)) * 1000;
+  setState(job, 'interrupted', { error: msg, retryAt: Date.now() + delay });
+  clearTimeout(retryTimers.get(job.id));
+  retryTimers.set(job.id, setTimeout(() => {
+    retryTimers.delete(job.id);
+    const j = jobs.get(job.id);
+    if (j && j.state === 'interrupted') { setState(j, 'queued'); pumpJobs(); }
+  }, delay));
+}
+
+// Sobald das Netz wieder da ist: unterbrochene Downloads sofort fortsetzen
+window.addEventListener('online', () => {
+  for (const j of jobs.values()) {
+    if (j.state === 'interrupted' && settings.autoResume) {
+      clearTimeout(retryTimers.get(j.id));
+      setState(j, 'queued');
+    }
+  }
+  pumpJobs();
+});
+
+// ---------------------------------------------------------------------------
+// Fortschritt und Restzeit
+// ---------------------------------------------------------------------------
+function tick(job) {
+  let s = speedState.get(job.id);
+  const now = Date.now();
+  if (!s) { s = { bytes: job.bytes, time: now }; speedState.set(job.id, s); }
+  const dt = (now - s.time) / 1000;
+  if (dt >= 1) {
+    const inst = Math.max(0, (job.bytes - s.bytes) / dt);
+    job.speed = job.speed ? job.speed * 0.7 + inst * 0.3 : inst;
+    s.bytes = job.bytes;
+    s.time = now;
+  }
+  if (job.kind !== 'direct' && job.done > 0 && job.total) {
+    job.estTotal = Math.round(job.bytes / job.done * job.total);
+  }
+  if (job.speed > 0 && job.estTotal > job.bytes) {
+    // Bei Streams: Restzeit auch aus Teilen/Zeit schätzen (stabiler bei schwankender Teilgröße)
+    job.eta = (job.estTotal - job.bytes) / job.speed;
+  } else if (job.estTotal && job.bytes >= job.estTotal) job.eta = 0;
+  persist(job);
+  notifyJobs(job);
+}
+
+// ---------------------------------------------------------------------------
+// Stream-Downloads (HLS / DASH): Teile werden einzeln gespeichert
+// ---------------------------------------------------------------------------
+function permanent(msg) { const e = new Error(msg); e.permanent = true; return e; }
+
+async function resolveTracks(job) {
+  if (job.kind === 'hls') {
+    const pl = VDL.parseM3U8(await fetchText(job.source), job.source);
+    let media = pl, audio = null;
+    if (pl.type === 'master') {
+      const best = pl.variants[0];
+      if (!best) throw permanent('Playlist ohne Varianten');
+      media = VDL.parseM3U8(await fetchText(best.url), best.url);
+      if (best.height) job.label = best.height + 'p';
+      if (best.audioGroup) {
+        const cands = pl.audio.filter(a => a.group === best.audioGroup);
+        const pick = cands.find(a => a.isDefault) || cands[0];
+        if (pick) audio = VDL.parseM3U8(await fetchText(pick.url), pick.url);
+      }
+    }
+    if (media.encrypted || (audio && audio.encrypted) || pl.encrypted) throw permanent('Verschlüsselter Stream – Download nicht möglich');
+    if (media.live) throw permanent('Live-Stream – wird nicht unterstützt');
+    const toParts = m => (m.map ? [{ url: m.map.url, range: m.map.range }] : [])
+      .concat(m.segments.map(s => ({ url: s.url, range: s.range })));
+    const tracks = [{ name: 'video', parts: toParts(media) }];
+    if (audio) tracks.push({ name: 'audio', parts: toParts(audio) });
+    return tracks;
+  }
+  if (job.kind === 'dash') {
+    const mpd = VDL.parseMPD(await fetchText(job.source), job.source);
+    if (mpd.live) throw permanent('Live-Stream – wird nicht unterstützt');
+    const v = mpd.video.find(r => !r.protected);
+    const a = mpd.audio.find(r => !r.protected);
+    if (!v && !a) throw permanent('DRM-geschützt – Download nicht möglich');
+    if (v && v.height) job.label = v.height + 'p';
+    const strip = parts => parts.map(p => ({ url: p.url, range: p.range || null }));
+    const tracks = [{ name: v ? 'video' : 'audio', parts: strip(VDL.dashSegments(v || a, job.source)) }];
+    if (v && a) tracks.push({ name: 'audio', parts: strip(VDL.dashSegments(a, job.source)) });
+    return tracks;
+  }
+  throw permanent('Unbekannter Typ');
+}
+
+async function fetchPart(p, signal) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const headers = {};
+      if (p.range) headers.Range = 'bytes=' + p.range.start + '-' + p.range.end;
+      const r = await fetch(p.url, { signal, headers, credentials: 'include' });
+      if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+      return new Uint8Array(await r.arrayBuffer());
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      const clientErr = e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
+      if (clientErr || attempt >= 3) throw e;
+      await sleep(800 * (attempt + 1));
+    }
+  }
+}
+
+function abortError() { const e = new Error('Abgebrochen'); e.name = 'AbortError'; return e; }
+
+async function runStream(job) {
+  const r = { ctrl: new AbortController(), reason: null };
+  rt.set(job.id, r);
+  speedState.delete(job.id);
+  try {
+    rememberReferer(job.source, job.pageUrl);
+    if (!job.tracks) {
+      job.phase = 'Playlist wird gelesen';
+      notifyJobs(job);
+      job.tracks = await resolveTracks(job);
+      job.total = job.tracks.reduce((s, t) => s + t.parts.length, 0);
+      job.done = 0; job.bytes = 0;
+      job.base = baseName(job.title, job.label);
+      await persist(job, true);
+    }
+    const hosts = new Set();
+    job.tracks.forEach(t => t.parts.forEach(p => { try { const h = new URL(p.url).host; if (!hosts.has(h)) { hosts.add(h); rememberReferer(p.url, job.pageUrl); } } catch (e) { /* ignore */ } }));
+    job.phase = 'Lade herunter';
+    await fetchMissing(job, r);
+    if (r.reason) throw abortError();
+    await finishStream(job, r);
+  } catch (e) {
+    await handleStreamError(job, e, r);
+  } finally {
+    rt.delete(job.id);
+    pumpJobs();
+  }
+}
+
+async function fetchMissing(job, r) {
+  const have = new Set(await VDLStore.partKeys(job.id));
+  const todo = [];
+  job.tracks.forEach((t, ti) => t.parts.forEach((p, i) => {
+    if (!have.has(VDLStore.partKey(job.id, ti, i))) todo.push({ ti, i, p });
+  }));
+  job.done = job.total - todo.length;
+  if (job.done > 0) job.note = job.note || 'An der abgebrochenen Stelle fortgesetzt (' + job.done + ' von ' + job.total + ' Teilen vorhanden).';
+  notifyJobs(job);
+  if (!todo.length) return;
+  let next = 0;
+  const worker = async () => {
+    while (next < todo.length && !r.ctrl.signal.aborted) {
+      const t = todo[next++];
+      const u8 = await fetchPart(t.p, r.ctrl.signal);
+      if (r.ctrl.signal.aborted) return;
+      await VDLStore.putPart(job.id, t.ti, t.i, new Blob([u8]));
+      job.done++;
+      job.bytes += u8.byteLength;
+      job.retries = 0;
+      job.refreshes = 0;
+      tick(job);
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(6, todo.length) }, worker));
+  } catch (e) {
+    if (!r.ctrl.signal.aborted) r.ctrl.abort();
+    throw e;
+  }
+}
+
+async function handleStreamError(job, e, r) {
+  if (r.reason === 'pause') return setState(job, 'paused', { phase: '' });
+  if (r.reason === 'cancel') {
+    await VDLStore.deleteParts(job.id).catch(() => {});
+    return setState(job, 'cancelled', { tracks: null, done: 0, bytes: 0, phase: '', note: '' });
+  }
+  job.phase = '';
+  if (e.permanent) return setState(job, 'error', { error: e.message, permanent: true });
+  if (e.saveCancelled) return setState(job, 'paused', { note: 'Speichern abgebrochen – „Fortsetzen“ speichert die fertige Datei erneut.' });
+  if (e.status && [401, 403, 404, 410].includes(e.status)) {
+    // Download-Adressen sind womöglich abgelaufen: Playlist neu lesen
+    if ((job.refreshes || 0) < 3) {
+      job.refreshes = (job.refreshes || 0) + 1;
+      try {
+        const fresh = await resolveTracks(job);
+        const same = job.tracks && fresh.length === job.tracks.length &&
+          fresh.every((t, i) => t.parts.length === job.tracks[i].parts.length);
+        if (same) {
+          job.tracks = fresh;
+          job.note = 'Download-Adressen erneuert – wird an derselben Stelle fortgesetzt.';
+          return setState(job, 'queued');
+        }
+        return restartFromScratch(job, 'Fortsetzen nicht möglich (Stream verändert) – Download wurde neu gestartet.', fresh);
+      } catch (e2) {
+        if (e2.permanent) return setState(job, 'error', { error: e2.message, permanent: true });
+      }
+    } else if ((job.restarts || 0) < 1) {
+      return restartFromScratch(job, 'Fortsetzen nicht möglich – Download wurde neu gestartet.');
+    } else {
+      return setState(job, 'error', { error: 'Server verweigert den Zugriff (' + e.message + '). Seite neu laden und das Video erneut herunterladen.' });
+    }
+  }
+  scheduleRetry(job, (e && e.message) || 'Verbindungsfehler');
+}
+
+async function restartFromScratch(job, note, tracks) {
+  await VDLStore.deleteParts(job.id).catch(() => {});
+  job.restarts = (job.restarts || 0) + 1;
+  job.tracks = tracks || null;
+  job.total = tracks ? tracks.reduce((s, t) => s + t.parts.length, 0) : 0;
+  job.done = 0; job.bytes = 0; job.refreshes = 0;
+  setState(job, 'queued', { note });
+}
+
+async function finishStream(job, r) {
+  setState(job, 'merging', { phase: 'Datei wird zusammengesetzt' });
+  const keys = (await VDLStore.partKeys(job.id)).sort();
+  const byTrack = job.tracks.map(() => []);
+  for (const k of keys) {
+    const ti = +k.split('|')[1];
+    if (byTrack[ti]) byTrack[ti].push(k);
+  }
+  byTrack.forEach((ks, ti) => {
+    if (ks.length !== job.tracks[ti].parts.length) throw new Error('Es fehlen noch Teile');
+  });
+  const load = async ks => { const out = []; for (const k of ks) out.push(await VDLStore.getPart(k)); return out; };
+  const head = async b => new Uint8Array(await b.slice(0, 16).arrayBuffer());
+  const vBlobs = await load(byTrack[0]);
+  const isAudioOnly = job.tracks[0].name === 'audio';
+  const vExt = sniffExt(await head(vBlobs[0]), isAudioOnly);
+  const outputs = [];
+  if (byTrack.length < 2) {
+    outputs.push([vBlobs, MIME[vExt], job.base + '.' + vExt]);
+  } else {
+    const aBlobs = await load(byTrack[1]);
+    const aExt = sniffExt(await head(aBlobs[0]), true);
+    let merged = null;
+    if (vExt === 'mp4' && aExt === 'm4a') {
+      try {
+        const toU8 = bs => Promise.all(bs.map(async b => new Uint8Array(await b.arrayBuffer())));
+        merged = VDLMp4.merge(await toU8(vBlobs), await toU8(aBlobs));
+      } catch (e) { console.warn('Zusammenführen fehlgeschlagen, speichere getrennt:', e); }
+    }
+    if (merged) outputs.push([merged, 'video/mp4', job.base + '.mp4']);
+    else {
+      job.note = 'Bild und Ton wurden getrennt gespeichert.';
+      outputs.push([vBlobs, MIME[vExt], job.base + '.' + vExt]);
+      outputs.push([aBlobs, MIME[aExt], job.base + ' (Tonspur).' + aExt]);
+    }
+  }
+  if (r.reason) throw abortError();
+  job.phase = 'Wird gespeichert';
+  notifyJobs(job);
+  const ids = [];
+  for (const [parts, mime, name] of outputs) ids.push(await saveBlobAndWait(parts, mime, name, job));
+  job.downloadId = ids[0];
+  job.filename = outputs[0][2];
+  await VDLStore.deleteParts(job.id).catch(() => {});
+  setState(job, 'done', { phase: '', error: '', tracks: null, done: job.total, estTotal: job.bytes, permanent: false });
+}
+
+const waiters = new Map();
+async function saveBlobAndWait(parts, mime, filename, job) {
+  const url = URL.createObjectURL(new Blob(parts, { type: mime }));
+  let id;
+  try {
+    id = await browser.downloads.download({ url, filename: buildPath(filename), saveAs: !!job.askWhere, conflictAction: 'uniquify' });
+  } catch (e) {
+    URL.revokeObjectURL(url);
+    if (/cancel/i.test(e.message || '')) { const c = new Error('Speichern abgebrochen'); c.saveCancelled = true; throw c; }
+    throw e;
+  }
+  try {
+    await new Promise((resolve, reject) => {
+      waiters.set(id, { resolve, reject });
+      browser.downloads.search({ id }).then(([d]) => {
+        if (d && d.state === 'complete') resolve();
+        else if (d && d.state === 'interrupted') reject(new Error(DL_ERRORS[d.error] || d.error || 'Speichern fehlgeschlagen'));
+      });
+    });
+  } finally {
+    waiters.delete(id);
+    URL.revokeObjectURL(url);
+  }
+  return id;
+}
+
+// ---------------------------------------------------------------------------
+// Direkte Dateien: Firefox lädt selbst (inkl. Fortsetzen per Range), wir überwachen
+// ---------------------------------------------------------------------------
+async function findDownload(job) {
+  if (job.downloadId != null) {
+    const [d] = await browser.downloads.search({ id: job.downloadId }).catch(() => []);
+    if (d && (d.url === job.source || d.finalUrl === job.source)) return d;
+  }
+  const list = await browser.downloads.search({ url: job.source, orderBy: ['-startTime'], limit: 1 }).catch(() => []);
+  return list[0] || null;
+}
+
+async function runDirect(job) {
+  try {
+    rememberReferer(job.source, job.pageUrl);
+    if (job.downloadId != null) {
+      const d = await findDownload(job);
+      if (d) {
+        job.downloadId = d.id;
+        dlToJob.set(d.id, job.id);
+        if (d.state === 'complete') return finishDirect(job, d);
+        if (d.state === 'in_progress') {
+          if (!d.paused) { ensurePoll(); return; }
+          if (d.canResume) {
+            await browser.downloads.resume(d.id);
+            job.note = 'An der abgebrochenen Stelle fortgesetzt.';
+            ensurePoll();
+            return;
+          }
+          await browser.downloads.cancel(d.id).catch(() => {});
+        }
+        if (d.state === 'interrupted' && d.canResume) {
+          await browser.downloads.resume(d.id);
+          job.note = 'An der abgebrochenen Stelle fortgesetzt.';
+          persist(job, true);
+          ensurePoll();
+          return;
+        }
+        // nicht fortsetzbar → alte Reste entfernen und neu laden
+        await browser.downloads.removeFile(d.id).catch(() => {});
+        await browser.downloads.erase({ id: d.id }).catch(() => {});
+      }
+      job.restarts = (job.restarts || 0) + 1;
+      job.note = 'Fortsetzen war nicht möglich – Download wurde neu gestartet.';
+      job.bytes = 0;
+    }
+    job.filename = job.base + '.' + job.ext;
+    const id = await browser.downloads.download({
+      url: job.source, filename: buildPath(job.filename),
+      saveAs: !!job.askWhere && !job.restarts, conflictAction: 'uniquify'
+    });
+    job.downloadId = id;
+    dlToJob.set(id, job.id);
+    speedState.delete(job.id);
+    persist(job, true);
+    ensurePoll();
+  } catch (e) {
+    const msg = (e && e.message) || String(e);
+    if (/cancel/i.test(msg)) setState(job, 'cancelled', { note: 'Speichern-Dialog abgebrochen' });
+    else scheduleRetry(job, msg);
+    pumpJobs();
+  }
+}
+
+function finishDirect(job, d) {
+  job.bytes = (d && (d.fileSize || d.bytesReceived)) || job.bytes;
+  job.estTotal = job.bytes;
+  if (d && d.filename) job.filename = d.filename.split(/[\\/]/).pop();
+  setState(job, 'done', { phase: '', error: '' });
+  pumpJobs();
+}
+
+let pollTimer = null;
+function ensurePoll() { if (!pollTimer) pollTimer = setInterval(poll, 1000); }
+async function poll() {
+  const act = [...jobs.values()].filter(j => j.kind === 'direct' && j.state === 'running' && j.downloadId != null);
+  if (!act.length) { clearInterval(pollTimer); pollTimer = null; return; }
+  for (const j of act) {
+    const [d] = await browser.downloads.search({ id: j.downloadId }).catch(() => []);
+    if (!d) continue;
+    if (d.state === 'complete') { finishDirect(j, d); continue; }
+    j.bytes = d.bytesReceived || 0;
+    if (d.totalBytes > 0) j.estTotal = d.totalBytes;
+    j.phase = d.paused ? 'Pausiert (Firefox)' : 'Lade herunter';
+    tick(j);
+    if (d.estimatedEndTime) {
+      const eta = (Date.parse(d.estimatedEndTime) - Date.now()) / 1000;
+      if (isFinite(eta) && eta >= 0) j.eta = eta;
+    }
+  }
+}
+
+browser.downloads.onChanged.addListener(async delta => {
+  const w = waiters.get(delta.id);
+  if (w && delta.state) {
+    if (delta.state.current === 'complete') w.resolve();
+    else if (delta.state.current === 'interrupted') {
+      const err = delta.error ? delta.error.current : '';
+      w.reject(new Error(DL_ERRORS[err] || err || 'Speichern fehlgeschlagen'));
+    }
+  }
+  const jid = dlToJob.get(delta.id);
+  const job = jid && jobs.get(jid);
+  if (!job || job.kind !== 'direct' || job.downloadId !== delta.id) return;
+  if (delta.state) {
+    const cur = delta.state.current;
+    if (cur === 'complete') {
+      const [d] = await browser.downloads.search({ id: delta.id }).catch(() => []);
+      return finishDirect(job, d);
+    }
+    if (cur === 'interrupted') {
+      const err = delta.error ? delta.error.current : '';
+      if (job.userCancel || err === 'USER_CANCELED') {
+        job.userCancel = false;
+        if (job.state !== 'cancelled') setState(job, 'cancelled', { note: '' });
+        pumpJobs();
+        return;
+      }
+      scheduleRetry(job, 'Abgebrochen: ' + (DL_ERRORS[err] || err || 'unbekannter Fehler'));
+      pumpJobs();
+      return;
+    }
+    if (cur === 'in_progress' && job.state !== 'running') { setState(job, 'running'); ensurePoll(); }
+  }
+  if (delta.paused) {
+    if (delta.paused.current === true && job.state === 'running' && !job.pausing) setState(job, 'paused');
+    if (delta.paused.current === false && job.state === 'paused') { setState(job, 'running'); ensurePoll(); }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Start: gespeicherte Aufträge laden und Unterbrochenes fortsetzen
+// ---------------------------------------------------------------------------
+async function restoreJobs() {
+  await settingsReady;
+  const all = await VDLStore.allJobs().catch(() => []);
+  const cutoff = Date.now() - 30 * 86400000;
+  for (const j of all) {
+    if (FINAL.has(j.state) && (j.finished || 0) < cutoff) {
+      VDLStore.deleteJob(j.id).catch(() => {});
+      VDLStore.deleteParts(j.id).catch(() => {});
+      continue;
+    }
+    jobs.set(j.id, j);
+    if (j.downloadId != null) dlToJob.set(j.downloadId, j.id);
+    if (['running', 'merging', 'queued', 'interrupted'].includes(j.state)) {
+      j.speed = 0; j.eta = 0;
+      if (settings.autoResume) {
+        j.state = 'queued';
+        if (j.done > 0 || j.kind === 'direct') j.note = 'Nach Neustart automatisch fortgesetzt.';
+      } else j.state = 'interrupted';
+      persist(j);
+    }
+  }
+  notifyJobs();
+  pumpJobs();
+}
+restoreJobs();
+
+// ---------------------------------------------------------------------------
+// Nachrichten aus Popup und Seitenleiste
+// ---------------------------------------------------------------------------
+browser.runtime.onMessage.addListener(msg => {
+  switch (msg.type) {
+    case 'download':
+      return createJob(msg.tabId, msg.key).then(j => j.id, e => ({ error: e.message }));
+    case 'getJobs': {
+      const order = { running: 0, merging: 0, queued: 1, interrupted: 2, paused: 3, error: 4, cancelled: 5, done: 6 };
+      const list = [...jobs.values()].map(jobPub)
+        .sort((a, b) => (order[a.state] - order[b.state]) || (b.created - a.created));
+      return Promise.resolve({ jobs: list, settings, update: updateInfo });
+    }
+    case 'pauseJob': return pauseJob(msg.id).then(() => true);
+    case 'resumeJob': resumeJob(msg.id); return Promise.resolve(true);
+    case 'cancelJob': return cancelJob(msg.id).then(() => true);
+    case 'removeJob': return removeJob(msg.id).then(() => true);
+    case 'pauseAll':
+      return Promise.all([...jobs.values()].filter(j => ACTIVE.has(j.state) || j.state === 'queued' || j.state === 'interrupted')
+        .map(j => pauseJob(j.id))).then(() => true);
+    case 'resumeAll':
+      [...jobs.values()].filter(j => j.state === 'paused' || j.state === 'interrupted').forEach(j => resumeJob(j.id));
+      return Promise.resolve(true);
+    case 'clearFinished':
+      return Promise.all([...jobs.values()].filter(j => j.state === 'done' || j.state === 'cancelled')
+        .map(j => removeJob(j.id))).then(() => true);
+  }
+});

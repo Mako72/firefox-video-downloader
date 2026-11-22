@@ -1,0 +1,80 @@
+{
+  "manifest_version": 2,
+  "name": "Video-Downloader",
+  "version": "1.1.0",
+  "description": "Erkennt Videos auf Webseiten (auch eingebettete, HLS- und DASH-Streams), lädt sie in bester Qualität herunter und setzt abgebrochene Downloads fort.",
+  "icons": {
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "video-downloader@mako72",
+      "strict_min_version": "140.0",
+      "update_url": "https://raw.githubusercontent.com/Mako72/firefox-video-downloader/main/updates.json",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "<all_urls>",
+    "webRequest",
+    "webRequestBlocking",
+    "downloads",
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "menus",
+    "alarms"
+  ],
+  "background": {
+    "scripts": [
+      "lib/parsers.js",
+      "lib/mp4merge.js",
+      "lib/store.js",
+      "background.js",
+      "jobs.js",
+      "updater.js"
+    ],
+    "persistent": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_action": {
+    "default_title": "Video-Downloader",
+    "default_popup": "popup/popup.html",
+    "default_icon": "icons/icon.svg"
+  },
+  "sidebar_action": {
+    "default_title": "Video-Downloads",
+    "default_panel": "sidebar/sidebar.html",
+    "default_icon": "icons/icon.svg",
+    "open_at_install": false
+  },
+  "commands": {
+    "_execute_sidebar_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+V"
+      },
+      "description": "Download-Seitenleiste öffnen/schließen"
+    }
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  }
+}
