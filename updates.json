@@ -25,6 +25,10 @@
         {
           "version": "1.6.0",
           "update_link": "https://github.com/Mako72/firefox-video-downloader/releases/download/v1.6.0/video-downloader-1.6.0.xpi"
+        },
+        {
+          "version": "1.7.0",
+          "update_link": "https://github.com/Mako72/firefox-video-downloader/releases/download/v1.7.0/video-downloader-1.7.0.xpi"
         }
       ]
     }
