@@ -2,7 +2,7 @@
 'use strict';
 const VDL_DEFAULTS = {
   subfolder: 'Videos', askWhere: false, autoDeep: true, showAll: false, minSizeKB: 300,
-  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar'
+  maxParallel: 2, autoResume: true, openSidebar: true, autoUpdate: true, iconAction: 'sidebar', autoClear: 'never'
 };
 
 function el(tag, attrs, ...kids) {
@@ -50,6 +50,16 @@ async function renderSettings(root) {
   act.value = s.iconAction;
   act.addEventListener('change', () => save('iconAction', act.value));
 
+  const clr = el('select', { id: 'set-clr' },
+    el('option', { value: 'never', text: 'nie (nur von Hand)' }),
+    el('option', { value: 'immediate', text: 'sofort nach dem Speichern' }),
+    el('option', { value: '10min', text: 'nach 10 Minuten' }),
+    el('option', { value: '1h', text: 'nach 1 Stunde' }),
+    el('option', { value: '1d', text: 'nach 1 Tag' }),
+    el('option', { value: 'restart', text: 'beim nächsten Firefox-Start' }));
+  clr.value = s.autoClear;
+  clr.addEventListener('change', () => save('autoClear', clr.value));
+
   const saved = el('span', { class: 'set-saved' });
 
   root.replaceChildren(
@@ -64,6 +74,9 @@ async function renderSettings(root) {
     check('autoResume', 'Abgebrochene Downloads automatisch fortsetzen (auch nach Neustart)'),
     check('openSidebar', 'Seitenleiste beim Start eines Downloads öffnen'),
     check('autoUpdate', 'Updates automatisch suchen und installieren'),
+    el('label', { class: 'set-label', for: 'set-clr', text: 'Fertige Downloads aus der Liste entfernen' }),
+    clr,
+    el('p', { class: 'set-hint', text: 'Gilt für fertige und abgebrochene Downloads. Die gespeicherten Dateien bleiben erhalten.' }),
     el('label', { class: 'set-label', for: 'set-par', text: 'Gleichzeitige Downloads' }),
     par,
     el('label', { class: 'set-label', for: 'set-min', text: 'Dateien kleiner als (KB) ausblenden' }),

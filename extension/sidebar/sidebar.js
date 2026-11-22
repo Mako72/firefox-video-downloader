@@ -148,7 +148,7 @@ function updateRow(r, j) {
     b.push(button('📂 Im Ordner zeigen', 'ghost', '', () => browser.downloads.show(j.downloadId).catch(e => alertRow(r, e))));
   }
   if (['done', 'error', 'cancelled'].includes(j.state)) {
-    b.push(button('🗑', 'ghost', 'Aus der Liste entfernen (die Datei bleibt erhalten)', () => send({ type: 'removeJob', id }).then(refreshSoon)));
+    b.push(button('✓ Aus Liste entfernen', 'ghost', 'Nur aus der Liste entfernen – die Datei bleibt erhalten', () => send({ type: 'removeJob', id }).then(refreshSoon)));
   }
   r.btns.replaceChildren(...b);
 }

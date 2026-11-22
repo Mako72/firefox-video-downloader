@@ -97,12 +97,32 @@ function notifyJobs(job) {
 function setState(job, state, extra) {
   job.state = state;
   Object.assign(job, extra || {});
-  if (FINAL.has(state)) job.finished = Date.now();
+  if (FINAL.has(state)) { job.finished = Date.now(); scheduleAutoClear(job); }
   if (state !== 'running' && state !== 'merging') { job.speed = 0; job.eta = 0; }
   if (state !== 'interrupted') job.retryAt = 0;
   persist(job, true);
   notifyJobs(job);
   if (!ACTIVE.has(state) && typeof maybeApplyUpdate === 'function') setTimeout(maybeApplyUpdate, 500);
+}
+
+// Fertige (und abgebrochene) Downloads automatisch aus der Liste entfernen – je nach Einstellung.
+// Die Dateien bleiben erhalten; Fehler bleiben stehen, damit man sie sieht.
+const CLEARABLE = new Set(['done', 'cancelled']);
+const CLEAR_DELAY = { immediate: 8000, '10min': 10 * 60000, '1h': 3600000, '1d': 86400000 };
+function scheduleAutoClear(job) {
+  const d = CLEAR_DELAY[settings.autoClear];
+  if (!d || !CLEARABLE.has(job.state)) return;
+  setTimeout(() => {
+    const j = jobs.get(job.id);
+    if (j && CLEARABLE.has(j.state)) removeJob(j.id);
+  }, Math.max(0, (job.finished || Date.now()) + d - Date.now()));
+}
+function sweepFinished(onStartup) {
+  for (const j of [...jobs.values()]) {
+    if (!CLEARABLE.has(j.state)) continue;
+    if (onStartup && settings.autoClear === 'restart') { removeJob(j.id); continue; }
+    scheduleAutoClear(j);
+  }
 }
 
 function jobPub(j) {
@@ -260,6 +280,8 @@ function scheduleRetry(job, msg) {
     if (j && j.state === 'interrupted') { setState(j, 'queued'); pumpJobs(); }
   }, delay));
 }
+
+browser.storage.onChanged.addListener((ch, area) => { if (area === 'local' && ch.autoClear) setTimeout(() => sweepFinished(false), 100); });
 
 // Sobald das Netz wieder da ist: unterbrochene Downloads sofort fortsetzen
 window.addEventListener('online', () => {
@@ -829,6 +851,7 @@ async function restoreJobs() {
   }
   notifyJobs();
   pumpJobs();
+  sweepFinished(true);
 }
 restoreJobs();
 
