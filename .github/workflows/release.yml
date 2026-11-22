@@ -110,24 +110,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           V="${{ steps.v.outputs.version }}"
-          NAME="video-downloader-$V.xpi"
-          FILE="dist/$NAME"
-          # Erst als Entwurf anlegen: Bei unveränderlichen Releases lassen sich Dateien nur an Entwürfe anhängen
-          gh release create "v$V" --draft --title "Version $V" \
-            --notes "Signierte Firefox-Erweiterung. Datei anklicken bzw. in Firefox öffnen, um sie zu installieren. Bereits installierte Versionen aktualisieren sich automatisch."
-          RID=$(gh api "repos/${{ github.repository }}/releases?per_page=30" --jq ".[] | select(.tag_name==\"v$V\") | .id" | head -n1)
-          echo "Release-ID: $RID"
-          # Mit dem Dateityp für Firefox-Erweiterungen hochladen (Klick installiert direkt); sonst normal hochladen
-          if ! curl -sSf -X POST \
-              -H "Authorization: Bearer $GH_TOKEN" \
-              -H "Content-Type: application/x-xpinstall" \
-              --data-binary @"$FILE" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RID/assets?name=$NAME" > /dev/null; then
-            echo "::warning::Upload mit Dateityp fehlgeschlagen – lade normal hoch."
-            gh release upload "v$V" "$FILE" --clobber
-          fi
-          gh release edit "v$V" --draft=false --latest
-          gh release view "v$V" --json assets --jq '.assets[].name'
+          FILE="dist/video-downloader-$V.xpi"
+          # Release und Datei in einem Schritt (funktioniert auch mit unveränderlichen Releases)
+          gh release create "v$V" "$FILE" --title "Version $V" --latest \
+            --notes "Signierte Firefox-Erweiterung. Datei herunterladen und in Firefox öffnen (oder in ein Firefox-Fenster ziehen), um sie zu installieren. Bereits installierte Versionen aktualisieren sich automatisch."
+          # Kontrolle: Die Datei muss am Release hängen, sonst KEINE Update-Liste schreiben
+          sleep 5
+          N=$(gh release view "v$V" --json assets --jq '[.assets[] | select(.name == "video-downloader-'"$V"'.xpi")] | length')
+          echo "Angehängte Dateien: $N"
+          if [ "$N" != "1" ]; then echo "::error::Die signierte Datei hängt nicht am Release – Update-Liste wird nicht geändert."; exit 1; fi
 
       - name: Update-Liste aktualisieren
         if: steps.check.outputs.exists == 'false' && steps.keys.outputs.ok == 'true'
