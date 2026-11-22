@@ -111,12 +111,12 @@ function jobPub(j) {
     id: j.id, kind: j.kind, title: j.title, label: j.label, base: j.base, filename: j.filename, thumb: j.thumb,
     state: j.state, error: j.error, note: j.note, phase: j.phase, done: j.done, total: j.total, bytes: j.bytes,
     estTotal: j.estTotal, speed: j.speed, eta: j.eta, retryAt: j.retryAt, created: j.created, finished: j.finished,
-    downloadId: j.downloadId, restarts: j.restarts, itemKey: j.itemKey, source: j.source, pageUrl: j.pageUrl
+    downloadId: j.downloadId, restarts: j.restarts, itemKey: j.itemKey, source: j.source, pageUrl: j.pageUrl, audioOnly: !!j.audioOnly
   };
 }
 function jobForItem(key) {
   let best = null;
-  for (const j of jobs.values()) if (j.itemKey === key && (!best || j.created > best.created)) best = j;
+  for (const j of jobs.values()) if (j.itemKey === key && !j.audioOnly && (!best || j.created > best.created)) best = j;
   return jobPub(best);
 }
 
@@ -128,8 +128,9 @@ async function createJob(tabId, key, opts) {
   const st = tabs.get(tabId);
   const it = st && st.items.get(key);
   if (!it) throw new Error('Video nicht mehr vorhanden – Seite neu laden');
+  const audioOnly = !!opts.audioOnly;
   for (const j of jobs.values()) {
-    if (j.source === it.url && !FINAL.has(j.state)) {
+    if (j.source === it.url && !!j.audioOnly === audioOnly && !FINAL.has(j.state)) {
       if (!ACTIVE.has(j.state)) resumeJob(j.id);
       return j;
     }
@@ -146,7 +147,8 @@ async function createJob(tabId, key, opts) {
     id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
     kind: it.kind, source: it.url, itemKey: it.key, tabId,
     pageUrl: st.pageUrl || (tab && tab.url) || '', title, label: it.label || '',
-    base: baseName(title, it.label), ext, filename: '',
+    base: audioOnly ? sanitize(title) + ' (Ton)' : baseName(title, it.label), ext, filename: '',
+    audioOnly, sizeHint: it.size || 0,
     thumb: thumb && thumb.length < 120000 ? thumb : null,
     created: Date.now(), state: 'queued', phase: '', note: '', error: '',
     done: 0, total: 0, bytes: 0, estTotal: it.size || 0, speed: 0, eta: 0,
@@ -175,7 +177,7 @@ function runJob(job) {
   job.phase = '';
   job.error = '';
   setState(job, 'running');
-  if (job.kind === 'direct') runDirect(job);
+  if (job.kind === 'direct' && !job.audioOnly) runDirect(job);
   else runStream(job);
 }
 
@@ -301,6 +303,7 @@ function tick(job) {
 function permanent(msg) { const e = new Error(msg); e.permanent = true; return e; }
 
 async function resolveTracks(job) {
+  if (job.audioOnly) return resolveAudioTracks(job);
   if (job.kind === 'hls') {
     const pl = VDL.parseM3U8(await jobFetchText(job, job.source), job.source);
     let media = pl, audio = null;
@@ -336,6 +339,63 @@ async function resolveTracks(job) {
     return tracks;
   }
   throw permanent('Unbekannter Typ');
+}
+
+const AUDIO_CODEC = /mp4a|ac-3|ec-3|opus|mp3|flac|vorbis/i;
+const VIDEO_CODEC = /avc|hvc|hev|vp0?9|av01|vp8|mp4v/i;
+
+/** Nur Ton: möglichst wenig laden und die Tonspur herausziehen */
+async function resolveAudioTracks(job) {
+  const toParts = m => (m.map ? [{ url: m.map.url, range: m.map.range }] : [])
+    .concat(m.segments.map(s => ({ url: s.url, range: s.range })));
+  job.extract = null;
+  if (job.kind === 'dash') {
+    const mpd = VDL.parseMPD(await jobFetchText(job, job.source), job.source);
+    if (mpd.live) throw permanent('Live-Stream – wird nicht unterstützt');
+    const a = mpd.audio.find(r => !r.protected);
+    if (!a) throw permanent(mpd.protected ? 'DRM-geschützt – Download nicht möglich' : 'Dieser Stream hat keine eigene Tonspur');
+    return [{ name: 'audio', parts: VDL.dashSegments(a, job.source).map(p => ({ url: p.url, range: p.range || null })) }];
+  }
+  if (job.kind === 'hls') {
+    const pl = VDL.parseM3U8(await jobFetchText(job, job.source), job.source);
+    let media = pl, audioOnlyVariant = false;
+    if (pl.type === 'master') {
+      // 1. eigene Tonspur (Audio-Gruppe)
+      const best = pl.variants[0];
+      const group = best && best.audioGroup;
+      const cands = pl.audio.filter(a => !group || a.group === group);
+      const pick = cands.find(a => a.isDefault) || cands[0];
+      if (pick) {
+        const m = VDL.parseM3U8(await jobFetchText(job, pick.url), pick.url);
+        if (m.encrypted) throw permanent('Verschlüsselter Stream – Download nicht möglich');
+        if (m.live) throw permanent('Live-Stream – wird nicht unterstützt');
+        return [{ name: 'audio', parts: toParts(m) }];
+      }
+      // 2. reine Ton-Variante, sonst die kleinste Bildqualität (spart Daten)
+      let v = pl.variants.find(x => x.codecs && AUDIO_CODEC.test(x.codecs) && !VIDEO_CODEC.test(x.codecs));
+      audioOnlyVariant = !!v;
+      if (!v) v = pl.variants.slice().sort((a, b) => ((a.bandwidth || 0) - (b.bandwidth || 0)) || ((a.height || 0) - (b.height || 0)))[0];
+      media = VDL.parseM3U8(await jobFetchText(job, v.url), v.url);
+    }
+    if (media.encrypted || pl.encrypted) throw permanent('Verschlüsselter Stream – Download nicht möglich');
+    if (media.live) throw permanent('Live-Stream – wird nicht unterstützt');
+    if (audioOnlyVariant) return [{ name: 'audio', parts: toParts(media) }];
+    if (media.map) throw permanent('„Nur Ton“ ist bei diesem Stream nicht möglich (Bild und Ton gemeinsam im MP4-Format).');
+    job.extract = 'ts';
+    return [{ name: 'muxed', parts: toParts(media) }];
+  }
+  // direkte Datei
+  const ext = VDL.getExt(job.source);
+  if (['ts', 'mts', 'm2ts'].includes(ext)) job.extract = 'ts';
+  else if (['mp4', 'm4v', 'mov', 'm4a', '3gp', 'qt'].includes(ext) || /mp4|quicktime|3gpp/i.test(job.ct || '')) job.extract = 'mp4';
+  else throw permanent('„Nur Ton“ ist bei diesem Dateiformat (' + (ext || job.ct || 'unbekannt') + ') nicht möglich.');
+  let size = job.sizeHint;
+  if (!size && !job.noRange) { try { size = (await probe(job.source)).size; } catch (e) { size = 0; } }
+  const CH = 4 * 1024 * 1024;
+  if (!size || job.noRange) return [{ name: 'file', parts: [{ url: job.source, range: null }] }];
+  const parts = [];
+  for (let st = 0; st < size; st += CH) parts.push({ url: job.source, range: { start: st, end: Math.min(size, st + CH) - 1 } });
+  return [{ name: 'file', parts }];
 }
 
 // Anfrage über den geöffneten Tab (mit den Cookies, dem Referer und der Herkunft der Seite).
@@ -395,9 +455,13 @@ async function fetchPart(p, signal, job) {
         }
         const e = new Error('HTTP ' + r.status); e.status = r.status; throw e;
       }
+      if (p.range && r.status === 200 && job && job.kind === 'direct') {
+        try { r.body && r.body.cancel(); } catch (x) { /* ignore */ }
+        const e = new Error('Server unterstützt keine Teilanfragen'); e.noRange = true; throw e;
+      }
       return new Uint8Array(await r.arrayBuffer());
     } catch (e) {
-      if (e.name === 'AbortError' || e.noPage) throw e;
+      if (e.name === 'AbortError' || e.noPage || e.noRange) throw e;
       if (signal && signal.aborted) throw e;
       const clientErr = e.status >= 400 && e.status < 500 && e.status !== 408 && e.status !== 429;
       if (clientErr || attempt >= 3) throw e;
@@ -421,7 +485,7 @@ async function runStream(job) {
       job.tracks = await resolveTracks(job);
       job.total = job.tracks.reduce((s, t) => s + t.parts.length, 0);
       job.done = 0; job.bytes = 0;
-      job.base = baseName(job.title, job.label);
+      job.base = job.audioOnly ? sanitize(job.title) + ' (Ton)' : baseName(job.title, job.label);
       await persist(job, true);
     }
     const hosts = new Set();
@@ -479,6 +543,11 @@ async function handleStreamError(job, e, r) {
   job.phase = '';
   if (e.permanent) return setState(job, 'error', { error: e.message, permanent: true });
   if (e.noPage) return setState(job, 'interrupted', { error: e.message, retryAt: 0 });
+  if (e.noRange && !job.noRange) {
+    job.noRange = true;
+    return restartFromScratch(job, 'Server lädt nur am Stück – Download wurde in einem Teil neu gestartet.');
+  }
+  if (e.extractFailed) return setState(job, 'error', { error: e.message, permanent: true });
   if (e.saveCancelled) return setState(job, 'paused', { note: 'Speichern abgebrochen – „Fortsetzen“ speichert die fertige Datei erneut.' });
   if (e.status && [401, 403, 404, 410].includes(e.status)) {
     // Download-Adressen sind womöglich abgelaufen: Playlist neu lesen
@@ -532,7 +601,23 @@ async function finishStream(job, r) {
   const isAudioOnly = job.tracks[0].name === 'audio';
   const vExt = sniffExt(await head(vBlobs[0]), isAudioOnly);
   const outputs = [];
-  if (byTrack.length < 2) {
+  if (job.extract) {
+    job.phase = 'Ton wird herausgezogen';
+    notifyJobs(job);
+    try {
+      if (job.extract === 'ts') {
+        const res = await VDLAudio.fromTs(vBlobs);
+        outputs.push([res.chunks, res.mime, job.base + '.' + res.ext]);
+      } else {
+        const all = new Uint8Array(await new Blob(vBlobs).arrayBuffer());
+        outputs.push([VDLAudio.fromMp4(all), 'audio/mp4', job.base + '.m4a']);
+      }
+    } catch (e) {
+      const x = new Error('Ton konnte nicht herausgezogen werden: ' + e.message);
+      x.extractFailed = true;
+      throw x;
+    }
+  } else if (byTrack.length < 2) {
     outputs.push([vBlobs, MIME[vExt], job.base + '.' + vExt]);
   } else {
     const aBlobs = await load(byTrack[1]);
@@ -753,7 +838,7 @@ restoreJobs();
 browser.runtime.onMessage.addListener(msg => {
   switch (msg.type) {
     case 'download':
-      return createJob(msg.tabId, msg.key, { askWhere: msg.askWhere }).then(j => j.id, e => ({ error: e.message }));
+      return createJob(msg.tabId, msg.key, { askWhere: msg.askWhere, audioOnly: msg.audioOnly }).then(j => j.id, e => ({ error: e.message }));
     case 'getJobs': {
       const order = { running: 0, merging: 0, queued: 1, interrupted: 2, paused: 3, error: 4, cancelled: 5, done: 6 };
       const list = [...jobs.values()].map(jobPub)

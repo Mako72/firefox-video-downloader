@@ -52,6 +52,14 @@ function subline(it, versions) {
   parts.forEach((p, i) => { if (i) out.push(' · '); out.push(p); });
   return out;
 }
+function audioPossible(it) {
+  if (it.kind === 'dash') return it.hasAudio ? { ok: true, hint: 'M4A' } : { ok: false, hint: 'kein Ton' };
+  if (it.kind === 'hls') return { ok: true, hint: 'AAC/M4A' };
+  const ext = String(it.ext || '').toLowerCase();
+  if (['mp4', 'm4v', 'mov', 'm4a', '3gp', 'qt'].includes(ext) || /mp4|quicktime/i.test(it.ct || '')) return { ok: true, hint: 'M4A' };
+  if (['ts', 'mts', 'm2ts'].includes(ext)) return { ok: true, hint: 'AAC' };
+  return { ok: false, hint: ext.toUpperCase() + ' nicht möglich' };
+}
 function blocked(it) {
   if (it.status === 'protected') return 'Verschlüsselt/DRM – nicht möglich';
   if (it.status === 'live') return 'Live-Stream – nicht unterstützt';
@@ -238,6 +246,14 @@ function openMenu(anchor, g) {
   }
   kids.push(item('⬇  Herunterladen', () => startDownload(it.key, false), { right: qualityText(it), disabled: block }));
   kids.push(item('💾  Speichern unter …', () => startDownload(it.key, true), { disabled: block }));
+  const audio = audioPossible(it);
+  kids.push(item('🎵  Nur Ton herunterladen', () => {
+    if (state.settings.openSidebar) openSidebar();
+    send({ type: 'download', tabId, key: it.key, audioOnly: true }).then(r => {
+      if (r && r.error) toast(r.error); else toast('Ton-Download gestartet');
+      refreshSoon();
+    });
+  }, { right: audio.hint, disabled: block || !audio.ok }));
   if (g.others.length) {
     kids.push(el('div', { class: 'sep' }), el('div', { class: 'hd', text: 'Andere Qualität' }));
     for (const o of g.others) {

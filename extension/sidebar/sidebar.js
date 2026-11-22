@@ -98,6 +98,7 @@ function updateRow(r, j) {
   const tags = [];
   if (j.label) tags.push(el('span', { class: 'tag q', text: j.label }));
   tags.push(el('span', { class: 'tag', text: j.kind === 'direct' ? 'Datei' : j.kind.toUpperCase() }));
+  if (j.audioOnly) tags.push(el('span', { class: 'tag', text: '🎵 Nur Ton' }));
   if (j.restarts) tags.push(el('span', { class: 'tag', text: 'neu gestartet' }));
   r.meta.replaceChildren(...tags);
 

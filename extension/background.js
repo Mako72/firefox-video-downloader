@@ -78,7 +78,7 @@ function addItem(tabId, d) {
 browser.webRequest.onBeforeRequest.addListener(d => {
   if (d.type === 'main_frame' && d.tabId >= 0) {
     const st = tabState(d.tabId);
-    st.items.clear(); st.children.clear(); st.pageThumb = null; st.deep = 'idle'; st.pageUrl = d.url;
+    st.items.clear(); st.children.clear(); st.pageThumb = null; st.deep = 'idle'; st.pageUrl = d.url; st.shownCount = 0;
     scheduleUpdate(d.tabId);
   }
 }, { urls: ['<all_urls>'], types: ['main_frame'] });
@@ -221,6 +221,7 @@ async function analyze(tabId, it) {
     it.label = main.height ? main.height + 'p' : '';
     it.variantCount = mpd.video.length;
     it.separateAudio = !!(v && a);
+    it.hasAudio = !!a;
     if (mpd.duration) it.size = Math.round(((v ? v.bandwidth : 0) + (a ? a.bandwidth : 0)) * mpd.duration / 8);
     it.status = 'ready';
   }
@@ -258,7 +259,7 @@ function pub(it) {
     key: it.key, url: it.url, kind: it.kind, size: it.size, width: it.width, height: it.height,
     bandwidth: it.bandwidth, label: it.label, status: it.status, error: it.error, duration: it.duration,
     ext: it.kind === 'direct' ? (VDL.getExt(it.url) || extFromCt(it.ct) || 'mp4') : it.kind.toUpperCase(),
-    thumb: it.thumb, separateAudio: it.separateAudio, variantCount: it.variantCount || 0,
+    thumb: it.thumb, separateAudio: it.separateAudio, variantCount: it.variantCount || 0, hasAudio: it.hasAudio !== false, ct: it.ct,
     sources: [...it.sources], job: jobForItem(it.key)
   };
 }
@@ -306,6 +307,35 @@ function buildList(tabId) {
   return out;
 }
 
+// Symbol: grau ohne Videos, farbig mit Videos, kurzes Pulsieren bei neu gefundenen Videos
+const iconAnim = new Map();
+function updateIcon(tabId, n) {
+  const st = tabs.get(tabId);
+  const prev = st ? (st.shownCount || 0) : 0;
+  if (st) st.shownCount = n;
+  if (iconAnim.has(tabId)) return; // Animation setzt das Symbol am Ende selbst
+  browser.browserAction.setIcon({ tabId, path: n ? 'icons/icon.svg' : 'icons/icon-off.svg' }).catch(() => {});
+  if (n > prev) animateIcon(tabId);
+}
+function animateIcon(tabId) {
+  let i = 0;
+  const frames = ['icons/icon-glow.svg', 'icons/icon.svg'];
+  const timer = setInterval(() => {
+    if (i >= 6) {
+      clearInterval(timer);
+      iconAnim.delete(tabId);
+      const st = tabs.get(tabId);
+      const n = st ? st.shownCount || 0 : 0;
+      browser.browserAction.setIcon({ tabId, path: n ? 'icons/icon.svg' : 'icons/icon-off.svg' }).catch(() => {});
+      return;
+    }
+    browser.browserAction.setIcon({ tabId, path: frames[i % 2] }).catch(() => {});
+    i++;
+  }, 230);
+  iconAnim.set(tabId, timer);
+}
+browser.tabs.onRemoved.addListener(id => { clearInterval(iconAnim.get(id)); iconAnim.delete(id); });
+
 // Popup und Badge benachrichtigen (gedrosselt)
 const pending = new Map();
 function scheduleUpdate(tabId) {
@@ -315,6 +345,7 @@ function scheduleUpdate(tabId) {
     const n = buildList(tabId).length;
     browser.browserAction.setBadgeText({ tabId, text: n ? String(n) : '' }).catch(() => {});
     browser.browserAction.setBadgeBackgroundColor({ tabId, color: '#1f6feb' }).catch(() => {});
+    updateIcon(tabId, n);
     browser.runtime.sendMessage({ type: 'mediaUpdated', tabId }).catch(() => {});
   }, 200));
 }

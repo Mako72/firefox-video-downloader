@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Video-Downloader",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Erkennt Videos auf Webseiten (auch eingebettete, HLS- und DASH-Streams), lädt sie in bester Qualität herunter und setzt abgebrochene Downloads fort.",
   "icons": {
     "48": "icons/icon.svg",
@@ -35,6 +35,7 @@
       "lib/parsers.js",
       "lib/mp4merge.js",
       "lib/store.js",
+      "lib/audio.js",
       "background.js",
       "jobs.js",
       "updater.js"
@@ -57,7 +58,7 @@
   "browser_action": {
     "default_title": "Video-Downloader",
     "default_popup": "popup/popup.html",
-    "default_icon": "icons/icon.svg"
+    "default_icon": "icons/icon-off.svg"
   },
   "sidebar_action": {
     "default_title": "Video-Downloads",
